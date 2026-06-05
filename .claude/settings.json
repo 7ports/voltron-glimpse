@@ -1,0 +1,14 @@
+{
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"C:/Users/Raj/Documents/nongamerepos/project-voltron/scripts/auto-update-agents.js\""
+          }
+        ]
+      }
+    ]
+  }
+}
