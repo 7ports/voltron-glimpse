@@ -13,3 +13,7 @@
 .dolt/
 *.db
 .beads-credential-key
+
+# ── Project ─────────────────────────────────────────────────────
+node_modules/
+*.log

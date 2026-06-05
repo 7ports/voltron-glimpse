@@ -1,0 +1,24 @@
+{
+  "name": "voltron-glimpse",
+  "version": "0.1.0",
+  "description": "Real-time, read-only visualizer companion for Project Voltron agent runs.",
+  "license": "MIT",
+  "author": "RAJESH PUJARA <rapajara@gmail.com>",
+  "type": "commonjs",
+  "main": "bin/cli.js",
+  "bin": {
+    "voltron-glimpse": "./bin/cli.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "start": "node bin/cli.js",
+    "test": "node --test"
+  },
+  "dependencies": {
+    "chokidar": "^3.6.0",
+    "open": "^8.4.2",
+    "ws": "^8.18.0"
+  }
+}

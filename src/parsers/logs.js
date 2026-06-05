@@ -1,0 +1,122 @@
+const fs = require('node:fs');
+const path = require('node:path');
+const { EVENTS } = require('../eventBus');
+
+const RE_ENTRY = /^\[entry\]\s+(\S+)/;
+const RE_EXEC = /^\[exec\]\s+(\S+)/;
+const RE_EXIT = /^\[exit\]\s+(\S+)\s+code=(-?\d+)/;
+const RE_STEP = /^\[STEP(?:\s+(\d+))?\]\s*(.*)$/;
+const RE_DONE = /^\[DONE\]\s*(.*)$/;
+
+const ISO_SUFFIX_RE = /-\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}(?:-[A-Za-z0-9]+)?$/;
+
+function deriveContainerName(filename) {
+  if (typeof filename !== 'string' || filename.length === 0) return '';
+  return path.basename(filename).replace(/\.log$/i, '');
+}
+
+function deriveAgentName(containerName) {
+  if (!containerName) return '';
+  const stripped = containerName.replace(ISO_SUFFIX_RE, '');
+  return stripped || containerName;
+}
+
+function defaultLabel(state, exitCode) {
+  switch (state) {
+    case 'dispatching':
+      return 'container started';
+    case 'working':
+      return 'agent running';
+    case 'done':
+      return 'completed (exit 0)';
+    case 'errored':
+      return `errored (exit ${exitCode})`;
+    default:
+      return null;
+  }
+}
+
+function parseLog(content, filename) {
+  if (typeof content !== 'string' || typeof filename !== 'string') {
+    return [];
+  }
+  const containerName = deriveContainerName(filename);
+  if (!containerName) return [];
+  const agent = deriveAgentName(containerName);
+  const nodeId = containerName;
+
+  const lines = content.split(/\r?\n/);
+
+  let state = null;
+  let exitCode = null;
+  let latestStep = null;
+
+  for (const line of lines) {
+    if (!line || line.charCodeAt(0) !== 91) continue;
+
+    let m;
+    if ((m = RE_ENTRY.exec(line))) {
+      if (state === null) state = 'dispatching';
+    } else if ((m = RE_EXEC.exec(line))) {
+      state = 'working';
+    } else if ((m = RE_EXIT.exec(line))) {
+      exitCode = parseInt(m[2], 10);
+      state = exitCode === 0 ? 'done' : 'errored';
+    } else if ((m = RE_STEP.exec(line))) {
+      const num = m[1];
+      const text = (m[2] || '').trim();
+      if (num) {
+        latestStep = text ? `[STEP ${num}] ${text}` : `[STEP ${num}]`;
+      } else {
+        latestStep = text ? `[STEP] ${text}` : '[STEP]';
+      }
+    } else if ((m = RE_DONE.exec(line))) {
+      const summary = (m[1] || '').trim();
+      latestStep = summary ? `[DONE] ${summary}` : '[DONE]';
+    }
+  }
+
+  if (latestStep === null) {
+    latestStep = defaultLabel(state, exitCode);
+  }
+
+  const payload = { nodeId, agent, state, exitCode, latestStep, containerName };
+
+  const events = [];
+  if (state !== null) {
+    events.push({ event: EVENTS.AGENT_UPDATE, payload });
+  }
+  if (latestStep !== null) {
+    events.push({ event: EVENTS.LOG_UPDATE, payload });
+  }
+  return events;
+}
+
+function tailLog(filePath, fromOffset = 0) {
+  if (typeof filePath !== 'string' || filePath.length === 0) {
+    return { events: [], newOffset: Number(fromOffset) || 0 };
+  }
+  let stat;
+  try {
+    stat = fs.statSync(filePath);
+  } catch (err) {
+    return { events: [], newOffset: Number(fromOffset) || 0 };
+  }
+  const size = stat.size;
+  const start = Math.max(0, Number(fromOffset) || 0);
+  if (start >= size) {
+    return { events: [], newOffset: size };
+  }
+  const length = size - start;
+  const buf = Buffer.alloc(length);
+  const fd = fs.openSync(filePath, 'r');
+  try {
+    fs.readSync(fd, buf, 0, length, start);
+  } finally {
+    fs.closeSync(fd);
+  }
+  const events = parseLog(buf.toString('utf8'), filePath);
+  return { events, newOffset: size };
+}
+
+module.exports = { parseLog, tailLog, deriveContainerName, deriveAgentName };
