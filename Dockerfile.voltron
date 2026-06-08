@@ -32,6 +32,19 @@ RUN install -m 0755 -d /etc/apt/keyrings && \
     apt-get install -y --no-install-recommends docker-ce-cli && \
     rm -rf /var/lib/apt/lists/*
 
+# v3.13.0: GitHub CLI (gh) for publish agents (pr-opener, committer, branch-manager,
+# deploy-trigger, changelog-updater). Token is supplied at `docker run` time via
+# -e GH_TOKEN; the dispatch wrapper then runs `gh auth setup-git` so both `gh` and
+# `git push` authenticate. The token is NEVER baked into the image (no ENV/ARG).
+# See docs/voltron-git-credentials-plan.md.
+RUN install -m 0755 -d /etc/apt/keyrings && \
+    curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg -o /etc/apt/keyrings/githubcli-archive-keyring.gpg && \
+    chmod a+r /etc/apt/keyrings/githubcli-archive-keyring.gpg && \
+    echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" > /etc/apt/sources.list.d/github-cli.list && \
+    apt-get update && \
+    apt-get install -y --no-install-recommends gh && \
+    rm -rf /var/lib/apt/lists/*
+
 # v3.8.1: grant the non-root `voltron` user access to the mounted host Docker socket.
 # The host's /var/run/docker.sock is owned root:docker with mode 0660; its group GID
 # is host-dependent and unknown at image-build time, so we cannot preemptively add

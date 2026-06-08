@@ -510,8 +510,8 @@ Run before creating any work plan. Use the variant matching your shell.
 **Bash / macOS / Linux / WSL:**
 ```bash
 docker --version                                                                        # Docker available?
-test -f Dockerfile.voltron && echo "OK" || echo "MISSING"                              # Dockerfile present?
-echo "Token: $(test -n "$CLAUDE_CODE_OAUTH_TOKEN" && echo YES || echo NO)"             # OAuth token?
+test -f Dockerfile.voltron && echo "Dockerfile OK" || echo "DOCKERFILE MISSING"        # Dockerfile present?
+test -f "$HOME/.claude/.credentials.json" && echo "credentials OK" || echo "CREDENTIALS MISSING"  # mounted auth file?
 command -v bd >/dev/null 2>&1 && echo "beads OK" || echo "BEADS MISSING"               # beads CLI installed?
 if command -v bd >/dev/null 2>&1; then \
   bd dolt status 2>&1 | grep -qi "running" && echo "bd dolt OK" || { \
@@ -527,18 +527,24 @@ node -e "process.exit(JSON.parse(require('fs').readFileSync(require('os').homedi
 **PowerShell (Windows):**
 ```powershell
 docker --version
-if (Test-Path Dockerfile.voltron) { "OK" } else { "MISSING" }
-"Token: $(if ($env:CLAUDE_CODE_OAUTH_TOKEN) { 'YES' } else { 'NO' })"
+if (Test-Path Dockerfile.voltron) { "Dockerfile OK" } else { "DOCKERFILE MISSING" }
+if (Test-Path "$env:USERPROFILE/.claude/.credentials.json") { "credentials OK" } else { "CREDENTIALS MISSING" }
 if (Get-Command bd -ErrorAction SilentlyContinue) {
   "beads OK"
-  $status = bd dolt status 2>&1 | Out-String
-  if ($status -match 'running') { "bd dolt OK" } else {
-    "bd dolt down — auto-recovering..."; bd dolt start | Out-Null
-    $status = bd dolt status 2>&1 | Out-String
+  $status = (bd dolt status 2>&1 | Out-String)
+  if ($status -match 'running') {
+    "bd dolt OK"
+  } else {
+    "bd dolt down - auto-recovering..."
+    bd dolt start 2>&1 | Out-Null
+    $status = (bd dolt status 2>&1 | Out-String)
     if ($status -match 'running') { "bd dolt RECOVERED" } else { "BEADS SERVER DOWN" }
   }
-  bd ready --json *> $null; if ($LASTEXITCODE -eq 0) { "bd ready OK" } else { "BEADS READY FAILED" }
-} else { "BEADS MISSING" }
+  bd ready --json 2>&1 | Out-Null
+  if ($LASTEXITCODE -eq 0) { "bd ready OK" } else { "BEADS READY FAILED" }
+} else {
+  "BEADS MISSING"
+}
 if (Get-Command stringer -ErrorAction SilentlyContinue) { "stringer OK" } else { "STRINGER MISSING" }
 ```
 
@@ -546,7 +552,7 @@ if (Get-Command stringer -ErrorAction SilentlyContinue) { "stringer OK" } else {
 
 - **Docker missing** → "Docker is not installed or not running. Install Docker Desktop, then retry."
 - **Dockerfile missing** → "Run `mcp__project-voltron__scaffold_project` first."
-- **Token missing** → Agents fail silently with "Not logged in". Check Alexandria guide `project-voltron-docker` before proceeding.
+- **CREDENTIALS MISSING** → Docker agents will fail with "No auth available". Auth is mounted into the container from `~/.claude/.credentials.json` (read-only) — this file is the *only* supported auth path for Voltron agents; the `CLAUDE_CODE_OAUTH_TOKEN` env var on the host is NOT used. On **Unix / macOS**: run `claude setup-token` once to materialize the file. On **Windows**: `claude setup-token` does NOT write this file, so you must create/refresh `~/.claude/.credentials.json` manually — paste your current OAuth token into it (matching the JSON shape Claude Code uses on macOS) and update it whenever the token rotates. STOP and resolve before launching any agent.
 - **beads MISSING (mandatory)** → bd binary not on PATH. STOP. Tell the user: "beads is mandatory and not installed. Run `npm install -g @beads/bd` (or `brew install beads`) and retry. Do not proceed without it."
 - **bd dolt down — auto-recovering...** → expected output when the shared-server (`dolt.shared-server: true` in `.beads/config.yaml`) was orphaned by a reboot. Auto-recovery via `bd dolt start` runs inline; no action needed if followed by **bd dolt RECOVERED**.
 - **BEADS SERVER DOWN (auto-recovery failed)** → bd is installed but `bd dolt start` did not bring the server up. STOP. See the **Beads Recovery** section below; run `bd dolt status` manually for the actual error, then check for stale `.beads/dolt-server.pid`/`.lock` files. Do not proceed until `bd ready --json` returns cleanly.

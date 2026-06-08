@@ -15,6 +15,20 @@ AUTH_ARGS=()
 [ -n "$CLAUDE_CODE_OAUTH_TOKEN" ] && AUTH_ARGS+=(-e "CLAUDE_CODE_OAUTH_TOKEN=$CLAUDE_CODE_OAUTH_TOKEN")
 [ -n "$ANTHROPIC_API_KEY" ] && AUTH_ARGS+=(-e "ANTHROPIC_API_KEY=$ANTHROPIC_API_KEY")
 
+# v3.13.0: GitHub publish credentials. Supplied by the host via env var so the
+# token never persists in an image layer. One-time host setup (pick one):
+#   Unix:    export GH_TOKEN="$(gh auth token)"
+#   Windows: $env:GH_TOKEN = (gh auth token)
+#   Or set a fine-grained PAT directly as GH_TOKEN / GITHUB_TOKEN.
+# Falls back to GITHUB_TOKEN if GH_TOKEN is unset. Entirely optional —
+# read-only agents still run without it.
+GH_ARGS=()
+if [ -n "$GH_TOKEN" ]; then
+  GH_ARGS+=(-e "GH_TOKEN=$GH_TOKEN")
+elif [ -n "$GITHUB_TOKEN" ]; then
+  GH_ARGS+=(-e "GH_TOKEN=$GITHUB_TOKEN")
+fi
+
 CREDS_MOUNT=()
 [ -f "$HOME/.claude/.credentials.json" ] && CREDS_MOUNT+=(-v "$HOME/.claude/.credentials.json:/home/voltron/.claude/.credentials.json:ro")
 
@@ -28,6 +42,7 @@ GIT_MOUNT=()
 
 docker run --rm -it \
   "${AUTH_ARGS[@]}" \
+  "${GH_ARGS[@]}" \
   -v "$(pwd):/workspace" \
   "${CREDS_MOUNT[@]}" \
   "${GIT_MOUNT[@]}" \
