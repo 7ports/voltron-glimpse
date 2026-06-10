@@ -231,6 +231,11 @@ async function main() {
     const pollOnce = async function () {
       const result = await pollDocker({ cwd: projectRoot });
       reconciler.applyDockerPoll(result);
+      // Poll-driven log re-tail on the same cadence: advance [exec]/[STEP]/[exit]
+      // enrichment without depending on chokidar native fs-watch events firing
+      // (unreliable for container-written logs on WSL2/Windows bind mounts). The
+      // offset-tracked tail is idempotent, so this is safe alongside the watcher.
+      watcher.pollTail();
       // Propagate Docker availability to the WS snapshot even when membership
       // is unchanged (e.g. daemon up but no containers running).
       if (result.available !== lastAvailable) {

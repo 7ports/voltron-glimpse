@@ -79,10 +79,15 @@ function createWatcher(projectRoot, onLogEvent) {
     }
   }
 
+  // `usePolling` (not native fs events) + no `awaitWriteFinish`: container-written
+  // logs on WSL2/Windows bind mounts coalesce/miss native events, and
+  // awaitWriteFinish defers a continuously-growing log until writes settle. Polling
+  // surfaces appends promptly; pollTail() below is the authoritative belt-and-suspenders.
   const watcher = chokidar.watch(logsDir, {
     ignoreInitial: true,
     persistent: true,
-    awaitWriteFinish: { stabilityThreshold: 80, pollInterval: 20 },
+    usePolling: true,
+    interval: 500,
   });
 
   watcher.on('add', route);
@@ -91,13 +96,37 @@ function createWatcher(projectRoot, onLogEvent) {
     /* tolerate watch errors (missing dir, EPERM on Windows) */
   });
 
+  // Poll-driven tail: independent of native fs events. Walks the logs dir, picks up
+  // any *.log that appeared after startup (untracked files default to offset 0, so
+  // their [entry]/[exec] are read), and for every tracked log whose size grew reads
+  // ONLY the appended bytes via handleLog (offset-tracked + idempotent). Reading past
+  // EOF is a no-op, so calling this alongside chokidar is safe. The CLI invokes it on
+  // the Docker poll cadence so liveness no longer depends on fs-watch events firing.
+  function pollTail() {
+    let entries;
+    try {
+      entries = fs.readdirSync(logsDir);
+    } catch (_e) {
+      return; // logs dir may not exist yet — tolerate it
+    }
+    for (const name of entries) {
+      if (path.extname(name).toLowerCase() !== '.log') continue;
+      const resolved = path.resolve(path.join(logsDir, name));
+      try {
+        handleLog(resolved);
+      } catch (_e) {
+        /* swallow per-file read/parse errors — observer must never crash */
+      }
+    }
+  }
+
   function close() {
     for (const t of timers.values()) clearTimeout(t);
     timers.clear();
     return watcher.close();
   }
 
-  return { watcher, scanExisting, close };
+  return { watcher, scanExisting, pollTail, close };
 }
 
 module.exports = { createWatcher };
