@@ -52,3 +52,53 @@ test('pollDocker returns parsed containers on exec success', async () => {
   assert.strictEqual(result.containers.length, 4);
   assert.strictEqual(result.containers[0].agent, 'fullstack-dev');
 });
+
+test('pollDocker attaches podKey/podLabel and inspects once per id (caching)', async () => {
+  let inspectCalls = 0;
+  const inspectExec = (ids) => {
+    inspectCalls += 1;
+    return Promise.resolve(
+      ids.map((id) => `${id}\t/host_mnt/c/work/voltron-glimpse`).join('\n')
+    );
+  };
+  const podCache = new Map();
+  const poll = () =>
+    pollDocker({
+      cwd: '/x',
+      exec: () => FIXTURE,
+      inspectExec,
+      podCache,
+      scope: { allPods: true },
+    });
+
+  const r1 = await poll();
+  const r2 = await poll();
+
+  assert.strictEqual(inspectCalls, 1, 'inspect runs once; second poll is all cache hits');
+  const row = r1.containers.find((c) => c.agent === 'fullstack-dev');
+  assert.strictEqual(row.podKey, 'c/work/voltron-glimpse');
+  assert.strictEqual(row.podLabel, 'voltron-glimpse');
+  assert.strictEqual(
+    r2.containers.find((c) => c.agent === 'committer').podLabel,
+    'voltron-glimpse'
+  );
+});
+
+test('pollDocker marks podKey unknown when no /workspace mount resolves', async () => {
+  const inspectExec = (ids) =>
+    Promise.resolve(
+      ids
+        .map((id) => (id === '4c4c4c4c4c4c' ? `${id}\t` : `${id}\t/work/voltron-glimpse`))
+        .join('\n')
+    );
+  const result = await pollDocker({
+    cwd: '/x',
+    exec: () => FIXTURE,
+    inspectExec,
+    podCache: new Map(),
+    scope: { allPods: true },
+  });
+  const ui = result.containers.find((c) => c.agent === 'ui-designer');
+  assert.strictEqual(ui.podKey, 'unknown');
+  assert.strictEqual(ui.podLabel, 'unknown');
+});

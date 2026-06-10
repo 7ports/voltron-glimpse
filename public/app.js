@@ -68,6 +68,253 @@
   var DISPATCH_DASH_COLOR = '#2196f3';
 
   /* ──────────────────────────────────────────────────────────────────────
+   * Pod tracking — deterministic hue, registry, legend
+   * ────────────────────────────────────────────────────────────────────── */
+
+  var podRegistry = {}; // podKey → { label, isSelf, hue }
+
+  // Multi-pod state — derived from podRegistry when >= 2 distinct pods are live.
+  var multiPodMode = false; // true when 2+ pods visible; drives compound-parent rendering
+  var selfPodId = null;     // podKey whose selfPod===true (the CLI's own project)
+  var selfPodLabel = null;  // basename for the self-pod status badge
+
+  // Palette of HSL hues for non-self pods. Chosen to avoid:
+  //   green (working, ~100-160), red (errored, ~340-20), cyan/blue (hub/dispatch, ~175-215).
+  var POD_HUE_PALETTE = [270, 300, 30, 240, 320, 60, 15, 195];
+
+  // Returns a deterministic hue for a podKey. Self pod = gold (45). Unknown = null.
+  function podHue(podKey) {
+    if (!podKey || podKey === 'unknown') return null;
+    var reg = podRegistry[podKey];
+    if (reg && reg.hue != null) return reg.hue;
+    // Self pod is registered before this is called for it, so fall through to palette.
+    return POD_HUE_PALETTE[hashCode(podKey) % POD_HUE_PALETTE.length];
+  }
+
+  // HSLA border-color for the pod accent ring on nodes (secondary signal; status
+  // fill is unchanged). 'unknown' pods get a neutral grey.
+  function podAccentColor(podKey) {
+    var reg = podRegistry[podKey];
+    var hue = (reg && reg.hue != null) ? reg.hue : podHue(podKey);
+    if (hue === null) return 'rgba(136,153,170,0.55)';
+    return 'hsla(' + hue + ',65%,62%,0.90)';
+  }
+
+  // Solid HSL string for legend swatches.
+  function podSwatchColor(podKey) {
+    var reg = podRegistry[podKey];
+    var hue = (reg && reg.hue != null) ? reg.hue : podHue(podKey);
+    if (hue === null) return '#8899aa';
+    return 'hsl(' + hue + ',65%,62%)';
+  }
+
+  // Register or update a pod entry. Called from upsertNode and applySnapshot.
+  function registerPod(podKey, podLabel, isSelf) {
+    if (!podKey) return;
+    var selfFlag = !!isSelf;
+    if (!podRegistry[podKey]) {
+      // Self pod always gets gold (45) to be immediately distinguishable.
+      var hue = selfFlag ? 45 : podHue(podKey);
+      podRegistry[podKey] = { label: podLabel || podKey, isSelf: selfFlag, hue: hue };
+    } else {
+      if (podLabel) podRegistry[podKey].label = podLabel;
+      if (selfFlag && !podRegistry[podKey].isSelf) {
+        podRegistry[podKey].isSelf = true;
+        podRegistry[podKey].hue = 45; // retroactively apply gold hue
+      }
+    }
+    if (selfFlag && !selfPodId) {
+      selfPodId = podKey;
+      selfPodLabel = podLabel || podKey;
+    }
+    recomputeMultiPodMode();
+  }
+
+  // Recompute multiPodMode from podRegistry. Called automatically by registerPod.
+  // When the mode first transitions false→true mid-session, existing nodes are
+  // retroactively grouped into compound parents via a clean graph rebuild.
+  function recomputeMultiPodMode() {
+    var wasMulti = multiPodMode;
+    multiPodMode = Object.keys(podRegistry).length > 1;
+    // Guard: only retrofit when there are actual nodes in the graph (not during a
+    // snapshot rebuild where cy.elements().remove() already cleared the canvas).
+    if (!wasMulti && multiPodMode && cy && cy.nodes().length > 0) {
+      retrofitCompoundParents();
+    }
+  }
+
+  // When a second pod appears mid-session, rebuild the Cytoscape graph so all
+  // existing agent nodes get compound parents. Clears and repopulates from the
+  // in-memory liveAgents + edges arrays, which already reflect current state.
+  function retrofitCompoundParents() {
+    if (!cy) return;
+    cy.elements().remove();
+    Object.keys(podRegistry).forEach(function (podKey) { ensureCompoundParent(podKey); });
+    ensureHubNode();
+    Object.keys(liveAgents).forEach(function (id) {
+      var entry = liveAgents[id];
+      if (entry) upsertNode(entry);
+    });
+    setEdges(edges);
+  }
+
+  /* ──────────────────────────────────────────────────────────────────────
+   * Pod structural helpers — hub id namespacing, compound parents
+   * ────────────────────────────────────────────────────────────────────── */
+
+  // In multi-pod mode the hub id is namespaced per pod to avoid a single hub
+  // falsely implying one orchestrator dispatched all pods' containers.
+  function hubIdForPod(podKey) {
+    return multiPodMode ? (HUB_ID + '@' + (podKey || 'unknown')) : HUB_ID;
+  }
+
+  // Look up the pod-specific hub id for a live agent node.
+  function hubIdForNode(nodeId) {
+    var entry = liveAgents[nodeId];
+    var podKey = entry && (entry.podKey || null);
+    return hubIdForPod(podKey);
+  }
+
+  // Stable compound-parent node id for a pod. Prefix `pod::` avoids clashes.
+  function compoundParentId(podKey) {
+    return 'pod::' + (podKey || 'unknown');
+  }
+
+  // Ensure a Cytoscape compound-parent node for a pod exists (multi-pod only).
+  // The solid boundary signals real mount-source attribution (not inferred).
+  function ensureCompoundParent(podKey) {
+    if (!cy || !multiPodMode) return;
+    var pid = compoundParentId(podKey);
+    if (cy.getElementById(pid).nonempty()) return;
+    var reg = podRegistry[podKey] || { label: podKey || 'unknown', isSelf: false, hue: null };
+    var hue = reg.hue != null ? reg.hue : podHue(podKey);
+    var selfMarker = reg.isSelf ? ' ● you' : '';
+    var bgColor = hue != null
+      ? 'hsla(' + hue + ',38%,16%,0.36)'
+      : 'rgba(136,153,170,0.08)';
+    var borderColor = hue != null
+      ? 'hsla(' + hue + ',50%,48%,0.55)'
+      : 'rgba(136,153,170,0.35)';
+    cy.add({
+      group: 'nodes',
+      data: { id: pid, label: (reg.label || podKey || 'unknown') + selfMarker, podKey: podKey },
+      classes: 'pod-parent' + (reg.isSelf ? ' pod-self' : ''),
+      style: {
+        'background-color': bgColor,
+        'border-color':     borderColor,
+      },
+    });
+  }
+
+  // Ensure the hub node for a specific pod (or the global hub in single-pod mode).
+  function ensureHubNodeForPod(podKey) {
+    if (!cy) return;
+    var hid = hubIdForPod(podKey);
+    if (cy.getElementById(hid).nonempty()) return;
+    var reg = (podKey && podRegistry[podKey]) ? podRegistry[podKey] : {};
+    var hue = reg.hue != null ? reg.hue : (podKey ? podHue(podKey) : null);
+    // In multi-pod, include the pod label so users can tell hubs apart.
+    var label = (multiPodMode && reg.label)
+      ? HUB_ID + '\n' + reg.label
+      : hubLabel(hubState);
+    var nodeData = { id: hid, label: label, agent: HUB_ID, tier: 1, podKey: podKey };
+    if (multiPodMode && podKey) {
+      ensureCompoundParent(podKey);
+      nodeData.parent = compoundParentId(podKey);
+    }
+    cy.add({ group: 'nodes', data: nodeData, classes: 'tier1 hub' });
+    // Apply pod-hue accent as a secondary border tint (doesn't override hub fill for self pod).
+    if (hue != null) {
+      var hubEle = cy.getElementById(hid);
+      if (hubEle.nonempty()) {
+        if (reg.isSelf) {
+          hubEle.style({ 'border-color': 'hsla(' + hue + ',80%,55%,0.85)' });
+        } else {
+          hubEle.style({
+            'background-color': 'hsla(' + hue + ',55%,38%,1)',
+            'border-color':     'hsla(' + hue + ',65%,52%,0.80)',
+          });
+        }
+      }
+    }
+  }
+
+  // Returns all pods (including 'unknown') that have at least one currently live agent.
+  function getLivePods() {
+    var seen = {};
+    Object.keys(liveAgents).forEach(function (id) {
+      var e = liveAgents[id];
+      var key = (e && e.podKey) || 'unknown';
+      if (!seen[key]) {
+        var reg = podRegistry[key] || {};
+        seen[key] = {
+          label:  reg.label || (e && e.podLabel) || key,
+          isSelf: !!(reg.isSelf || (e && e.selfPod)),
+          hue:    (reg.hue != null) ? reg.hue : podHue(key),
+        };
+      }
+    });
+    return seen;
+  }
+
+  // Rebuild the pod legend section inside .legend.
+  // Hidden when fewer than 2 named pods are live (keeps single-pod view clean).
+  function updatePodLegend() {
+    var legendEl = document.querySelector('.legend');
+    if (!legendEl) return;
+
+    var livePods = getLivePods();
+    var keys = Object.keys(livePods);
+
+    var section = document.getElementById('pod-legend-section');
+    if (!section) {
+      section = document.createElement('div');
+      section.id = 'pod-legend-section';
+      section.className = 'legend-section pod-legend-section';
+      legendEl.appendChild(section);
+    }
+
+    if (keys.length < 2) {
+      section.style.display = 'none';
+      return;
+    }
+    section.style.display = '';
+
+    section.innerHTML = '';
+    var title = document.createElement('div');
+    title.className = 'legend-title';
+    title.textContent = 'Pods';
+    section.appendChild(title);
+
+    keys.forEach(function (key) {
+      var pod = livePods[key];
+      var row = document.createElement('div');
+      row.className = 'legend-row pod-legend-row';
+
+      var swatch = document.createElement('span');
+      swatch.className = 'pod-swatch';
+      swatch.style.background = podSwatchColor(key);
+      swatch.setAttribute('aria-hidden', 'true');
+      row.appendChild(swatch);
+
+      var labelSpan = document.createElement('span');
+      labelSpan.className = 'pod-legend-label';
+      labelSpan.textContent = pod.label || key;
+      row.appendChild(labelSpan);
+
+      if (pod.isSelf) {
+        var badge = document.createElement('span');
+        badge.className = 'pod-you-badge';
+        badge.textContent = 'you';
+        badge.setAttribute('aria-label', 'this project');
+        row.appendChild(badge);
+      }
+
+      section.appendChild(row);
+    });
+  }
+
+  /* ──────────────────────────────────────────────────────────────────────
    * DOM lookups (null-safe)
    * ────────────────────────────────────────────────────────────────────── */
 
@@ -180,23 +427,38 @@
   }
 
   // The synthetic hub exists while edges reference it OR while the orchestrator is
-  // journal-active (hubState non-null). Label derives from hubState when present.
+  // journal-active (hubState non-null). Multi-pod mode creates one hub per pod.
   function ensureHubNode() {
     if (!cy) return;
-    if (cy.getElementById(HUB_ID).nonempty()) return;
-    cy.add({
-      group: 'nodes',
-      data: { id: HUB_ID, label: hubLabel(hubState), agent: HUB_ID, tier: 1 },
-      classes: 'tier1 hub',
-    });
+    if (multiPodMode) {
+      Object.keys(podRegistry).forEach(function (podKey) { ensureHubNodeForPod(podKey); });
+    } else {
+      ensureHubNodeForPod(null);
+    }
   }
 
   function removeHubIfOrphan() {
     if (!cy) return;
-    // Keep hub if journal-active (hubState non-null) OR agents still live.
-    if (hubState !== null || Object.keys(liveAgents).length > 0) return;
-    var hub = cy.getElementById(HUB_ID);
-    if (hub.nonempty()) hub.remove();
+    if (!multiPodMode) {
+      if (hubState !== null || Object.keys(liveAgents).length > 0) return;
+      var hub = cy.getElementById(HUB_ID);
+      if (hub.nonempty()) hub.remove();
+      return;
+    }
+    // Multi-pod: remove each pod's hub (and empty compound parent) independently.
+    Object.keys(podRegistry).forEach(function (podKey) {
+      var hid = hubIdForPod(podKey);
+      var isSelfPod = (podKey === selfPodId);
+      var hasLiveAgents = Object.keys(liveAgents).some(function (nid) {
+        var e = liveAgents[nid];
+        return e && (e.podKey === podKey || (!e.podKey && podKey === 'unknown'));
+      });
+      if (hasLiveAgents || (isSelfPod && hubState !== null)) return;
+      var hubEle = cy.getElementById(hid);
+      if (hubEle.nonempty()) hubEle.remove();
+      var parentEle = cy.getElementById(compoundParentId(podKey));
+      if (parentEle.nonempty() && parentEle.children().length === 0) parentEle.remove();
+    });
   }
 
   // Create or update a single live-agent node from its entry. Returns true when
@@ -208,21 +470,28 @@
     var ele = cy.getElementById(id);
     var added = false;
 
+    // Pre-register the pod so multiPodMode + compound parents are ready before cy.add().
+    if (entry.podKey) registerPod(entry.podKey, entry.podLabel, entry.selfPod);
+
     if (ele.empty()) {
-      cy.add({
-        group: 'nodes',
-        data: {
-          id: id,
-          label: nodeLabel(entry),
-          agent: entry.agent || id,
-          container: entry.containerName,
-          createdAt: entry.createdAt,
-          step: entry.step,
-          state: entry.state,
-          exitCode: entry.exitCode,
-          tier: tier,
-        },
-      });
+      var podKey = entry.podKey || null;
+      var nodeData = {
+        id: id,
+        label: nodeLabel(entry),
+        agent: entry.agent || id,
+        container: entry.containerName,
+        createdAt: entry.createdAt,
+        step: entry.step,
+        state: entry.state,
+        exitCode: entry.exitCode,
+        tier: tier,
+        podKey: podKey,
+      };
+      if (multiPodMode && podKey) {
+        ensureCompoundParent(podKey);
+        nodeData.parent = compoundParentId(podKey);
+      }
+      cy.add({ group: 'nodes', data: nodeData });
       ele = cy.getElementById(id);
       added = true;
     } else {
@@ -244,6 +513,13 @@
       ele.addClass(stateClass(entry.state));
     }
 
+    // Pod accent — border ring in the pod's hue; status fill is unchanged.
+    // (registerPod already called at top of upsertNode before cy.add())
+    if (entry.podKey) {
+      ele.data('podKey', entry.podKey);
+      ele.style('border-color', podAccentColor(entry.podKey));
+    }
+
     return added;
   }
 
@@ -254,7 +530,8 @@
   }
 
   // Replace the entire edge set to match the authoritative payload (§3.2: hub →
-  // each live agent, inferred + dashed). Endpoints must already exist as nodes.
+  // each live agent, inferred + dashed). In multi-pod mode, remaps the global
+  // scrum-master source to the pod-specific hub for each target agent.
   function setEdges(nextEdges) {
     if (!cy) return;
     edges = Array.isArray(nextEdges) ? nextEdges.slice() : [];
@@ -263,14 +540,22 @@
     ensureHubNode();
     edges.forEach(function (e) {
       if (!e || !e.source || !e.target) return;
-      if (cy.getElementById(e.source).empty()) return;
+      var src = e.source;
+      // Remap global hub to pod-specific hub in multi-pod mode.
+      if (multiPodMode && src === HUB_ID) {
+        var targetEntry = liveAgents[e.target];
+        var targetPodKey = targetEntry && (targetEntry.podKey || null);
+        src = hubIdForPod(targetPodKey);
+        if (targetPodKey) ensureHubNodeForPod(targetPodKey);
+      }
+      if (cy.getElementById(src).empty()) return;
       if (cy.getElementById(e.target).empty()) return;
-      var id = e.id || (e.source + '->' + e.target);
+      var id = src + '->' + e.target;
       if (cy.getElementById(id).nonempty()) return;
       cy.add({
         group: 'edges',
-        data: { id: id, source: e.source, target: e.target },
-        classes: 'dispatch', // inferred dispatch spoke (dashed, per stylesheet)
+        data: { id: id, source: src, target: e.target },
+        classes: 'dispatch',
       });
     });
   }
@@ -279,23 +564,29 @@
   // wired even before the authoritative edge:update lands.
   function ensureSpoke(targetId) {
     if (!cy) return;
-    ensureHubNode();
-    var id = HUB_ID + '->' + targetId;
+    var entry = liveAgents[targetId];
+    var podKey = entry && (entry.podKey || null);
+    var hid = hubIdForPod(podKey);
+    if (multiPodMode && podKey) {
+      ensureHubNodeForPod(podKey);
+    } else {
+      ensureHubNodeForPod(null);
+    }
+    var id = hid + '->' + targetId;
     if (cy.getElementById(id).nonempty()) return;
     if (cy.getElementById(targetId).empty()) return;
     cy.add({
       group: 'edges',
-      data: { id: id, source: HUB_ID, target: targetId },
+      data: { id: id, source: hid, target: targetId },
       classes: 'dispatch',
     });
   }
 
-  // §3.5 — one-shot launch flash on the hub→agent spoke: a bright cyan glow that
-  // accelerates the marching-ants and decays back to the resting dashed style
-  // over ~1 s. Best-effort visual nicety; a missing spoke is simply ignored.
+  // §3.5 — one-shot launch flash on the hub→agent spoke.
   function flashDispatchSpoke(targetId) {
     if (!cy) return;
-    var spoke = cy.getElementById(HUB_ID + '->' + targetId);
+    var hid = hubIdForNode(targetId);
+    var spoke = cy.getElementById(hid + '->' + targetId);
     if (spoke.empty()) return;
     // Clear any queued/running spoke animation (e.g. the entrance fade) so the
     // flash plays immediately rather than after it.
@@ -336,21 +627,60 @@
   }
 
   // Built-in concentric layout (no dagre): hub / tier-1 at the center, higher
-  // tiers fan outward. concentric() returns a higher value for more-central
-  // nodes, so we invert tier (tier1 → 3, tier3 → 1).
+  // tiers fan outward. In multi-pod mode, run a separate concentric per pod
+  // cluster positioned in a grid so pods occupy distinct screen regions.
   function runLayout() {
     if (!cy || cy.nodes().length === 0) return;
     try {
-      cy.layout({
-        name: 'concentric',
-        concentric: function (node) { return 4 - (node.data('tier') || 3); },
-        levelWidth: function () { return 1; },
-        minNodeSpacing: 42,
-        animate: true,
-        animationDuration: LAYOUT_ANIM_MS,
-        fit: true,
-        padding: 48,
-      }).run();
+      if (!multiPodMode) {
+        cy.layout({
+          name: 'concentric',
+          concentric: function (node) { return 4 - (node.data('tier') || 3); },
+          levelWidth: function () { return 1; },
+          minNodeSpacing: 42,
+          animate: true,
+          animationDuration: LAYOUT_ANIM_MS,
+          fit: true,
+          padding: 48,
+        }).run();
+      } else {
+        // Per-pod concentric clusters arranged in a grid of non-overlapping regions.
+        var podKeys = Object.keys(podRegistry);
+        var cols = Math.max(1, Math.ceil(Math.sqrt(podKeys.length)));
+        var groupSize = 360;
+        var layoutsStarted = 0;
+        podKeys.forEach(function (podKey, idx) {
+          var pid = compoundParentId(podKey);
+          var parent = cy.getElementById(pid);
+          if (parent.empty()) return;
+          var children = parent.children();
+          if (children.length === 0) return;
+          var col = idx % cols;
+          var row = Math.floor(idx / cols);
+          layoutsStarted++;
+          children.layout({
+            name: 'concentric',
+            concentric: function (node) { return 4 - (node.data('tier') || 3); },
+            levelWidth: function () { return 1; },
+            minNodeSpacing: 32,
+            animate: true,
+            animationDuration: LAYOUT_ANIM_MS,
+            fit: false,
+            padding: 20,
+            boundingBox: {
+              x1: col * groupSize,
+              y1: row * groupSize,
+              w: groupSize - 30,
+              h: groupSize - 30,
+            },
+          }).run();
+        });
+        if (layoutsStarted > 0) {
+          setTimeout(function () {
+            try { cy.fit(undefined, 80); } catch (e) { /* never break the feed */ }
+          }, LAYOUT_ANIM_MS + 60);
+        }
+      }
     } catch (e) {
       // Layout must never break the live feed.
     }
@@ -483,8 +813,9 @@
       },
     });
 
-    // Spoke fades in alongside the node (starts invisible)
-    var spoke = cy.getElementById(HUB_ID + '->' + ele.id());
+    // Spoke fades in alongside the node (pod-aware hub lookup).
+    var nodePodKey = ele.data('podKey');
+    var spoke = cy.getElementById(hubIdForPod(nodePodKey) + '->' + ele.id());
     if (spoke.nonempty()) {
       spoke.style({ 'opacity': 0 });
       spoke.animate({ style: { 'opacity': 0.45 }, duration: 450, easing: 'ease-out' });
@@ -510,7 +841,9 @@
     ele.addClass(isError ? 'exiting-errored' : 'exiting-done');
 
     // Stop spoke flow immediately; tint it to match the terminal colour.
-    var spoke = cy.getElementById(HUB_ID + '->' + nodeId);
+    var exitPodKey = ele.data('podKey');
+    var exitHubId = hubIdForPod(exitPodKey);
+    var spoke = cy.getElementById(exitHubId + '->' + nodeId);
     if (spoke.nonempty()) {
       if (spoke.hasClass('active')) spoke.removeClass('active');
       spoke.style({
@@ -550,7 +883,7 @@
                 setTimeout(function () {
                   var n = cy.getElementById(nodeId);
                   if (n.nonempty()) n.remove();
-                  var s = cy.getElementById(HUB_ID + '->' + nodeId);
+                  var s = cy.getElementById(exitHubId + '->' + nodeId);
                   if (s.nonempty()) s.remove();
                   removeHubIfOrphan();
                   scheduleLayout();
@@ -587,9 +920,14 @@
           addMetaRow('Exit code',
             (typeof entry.exitCode === 'number') ? String(entry.exitCode) : '—');
         }
-      } else if (id === HUB_ID) {
+      } else if (id === HUB_ID || id.indexOf(HUB_ID + '@') === 0) {
         addMetaRow('Role', 'orchestrator (host session, inferred)');
-        if (hubState) {
+        var hubPodKey = node.data('podKey');
+        if (hubPodKey && podRegistry[hubPodKey]) {
+          var hreg = podRegistry[hubPodKey];
+          addMetaRow('Pod', hreg.label + (hreg.isSelf ? ' (you)' : ''));
+        }
+        if (hubState && (!multiPodMode || !hubPodKey || hubPodKey === selfPodId)) {
           addMetaRow('Status', hubState.state || '—');
           if (hubState.label) addMetaRow('Activity', truncate(hubState.label, 80));
           if (hubState.kind) addMetaRow('Kind', hubState.kind);
@@ -657,6 +995,34 @@
     }
   }
 
+  // Create or update the self-pod badge next to the connection badges (P4).
+  function setPodBadge(label) {
+    var badgesEl = document.querySelector('.status-badges');
+    if (!badgesEl) return;
+    var badge = document.getElementById('pod-badge');
+    if (!badge) {
+      badge = document.createElement('div');
+      badge.id = 'pod-badge';
+      badge.className = 'connection-badge pod-badge';
+      badge.setAttribute('role', 'status');
+      badge.setAttribute('aria-live', 'polite');
+      var dot = document.createElement('span');
+      dot.className = 'connection-dot';
+      badge.appendChild(dot);
+      var lbl = document.createElement('span');
+      lbl.className = 'connection-label';
+      badge.appendChild(lbl);
+      badgesEl.appendChild(badge);
+    }
+    var labelEl = badge.querySelector('.connection-label');
+    if (label) {
+      if (labelEl) labelEl.textContent = 'pod: ' + label;
+      badge.classList.remove('hidden');
+    } else {
+      badge.classList.add('hidden');
+    }
+  }
+
   // Any message may carry the current Docker availability; reflect it whenever
   // present.
   function trackDocker(payload) {
@@ -674,6 +1040,8 @@
     state = state || {};
     liveAgents = {};
     edges = [];
+    podRegistry = {}; // full reset — snapshot is authoritative
+    multiPodMode = false;
     if (cy) cy.elements().remove();
     hideTooltip();
 
@@ -684,7 +1052,29 @@
     // Set hubState first so ensureHubNode() uses the correct label when called by setEdges/ensureSpoke.
     hubState = (state.hub && state.hub.id) ? state.hub : null;
 
+    // Pre-register ALL pods BEFORE creating any nodes so that multiPodMode is
+    // correct and compound parents exist when the first cy.add() runs.
+    // (1) Explicit pods map from backend:
+    if (state.pods && typeof state.pods === 'object') {
+      Object.keys(state.pods).forEach(function (key) {
+        var p = state.pods[key];
+        if (p) registerPod(key, p.label || p.podLabel, p.isSelf);
+      });
+    }
+    // (2) Pods inferred from agent entries (covers snapshots without a pods map):
     var la = state.liveAgents || {};
+    Object.keys(la).forEach(function (id) {
+      var entry = la[id];
+      if (entry && entry.podKey) registerPod(entry.podKey, entry.podLabel, entry.selfPod);
+    });
+    // Pre-create compound parents now that multiPodMode is definitive. The
+    // cy.nodes().length guard in recomputeMultiPodMode prevented auto-retrofit
+    // (graph is empty), so we do it manually here.
+    if (multiPodMode) {
+      Object.keys(podRegistry).forEach(function (podKey) { ensureCompoundParent(podKey); });
+    }
+
+    // Now add agent nodes — multiPodMode and compound parents are already ready.
     Object.keys(la).forEach(function (id) {
       var entry = la[id];
       if (!entry || !entry.nodeId) return;
@@ -706,6 +1096,7 @@
     }
 
     if (layoutTimer) { clearTimeout(layoutTimer); layoutTimer = null; }
+    updatePodLegend();
     runLayout();
   }
 
@@ -720,6 +1111,7 @@
     if (p.dispatchFlash) {
       flashDispatchSpoke(p.nodeId); // §3.5 — correlated launch flash
     }
+    updatePodLegend();
     scheduleLayout();
   }
 
@@ -735,6 +1127,7 @@
     if (!p || !p.nodeId) return;
     var exitCode = (p && typeof p.exitCode === 'number') ? p.exitCode : undefined;
     delete liveAgents[p.nodeId]; // remove from live set immediately
+    updatePodLegend(); // pod may have no more live agents
     animateNodeExit(p.nodeId, exitCode); // §4.4 — node removal is deferred ~2.5 s
     // scheduleLayout() is called inside animateNodeExit after the linger window
   }

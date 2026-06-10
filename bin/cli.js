@@ -14,6 +14,7 @@ const { createWatcher } = require('../src/watcher');
 const { pollDocker } = require('../src/docker');
 const { createReconciler, HUB_ID } = require('../src/liveness');
 const { parseLog } = require('../src/parsers/logs');
+const { normalizePodPath } = require('../src/pods');
 
 const DEFAULT_PORT = 7424;
 const DEFAULT_POLL_MS = 1000;
@@ -41,6 +42,8 @@ function printHelp() {
       '  --docker      Use Docker introspection for liveness (default: on)',
       '  --no-docker   Skip Docker; infer liveness from log freshness (degraded)',
       '  --poll <ms>   Docker/log poll cadence in ms (default 1000)',
+      '  --all-pods    Show containers from every Voltron project (default: only this one)',
+      '  --pod <v>     Scope to a specific pod by basename or path (repeatable)',
       '  --hub-freshness <ms>  Journal idle window for the scrum-master hub (default 60000)',
       '  --verbose     Verbose logging',
       '  -h, --help    Show this help',
@@ -57,6 +60,8 @@ function parseArgs(argv) {
     docker: true, // Docker is the default, primary liveness path now.
     poll: DEFAULT_POLL_MS,
     hubFreshness: DEFAULT_HUB_FRESHNESS_MS,
+    allPods: false,
+    pods: [],
     verbose: false,
   };
   for (let i = 0; i < argv.length; i++) {
@@ -93,6 +98,15 @@ function parseArgs(argv) {
           fail(`invalid --poll value: ${v}`);
         }
         opts.poll = n;
+        break;
+      }
+      case '--all-pods':
+        opts.allPods = true;
+        break;
+      case '--pod': {
+        const v = argv[++i];
+        if (!v) fail('--pod requires a label or path argument');
+        opts.pods.push(v);
         break;
       }
       case '--hub-freshness': {
@@ -200,12 +214,24 @@ async function main() {
 
   const logsDir = path.join(projectRoot, '.voltron', 'logs');
 
+  // Pod scoping: the CLI's own pod is its resolved project root. By default the
+  // live set is filtered to this pod; --all-pods / --pod widen it (design §3).
+  const selfPodKey = normalizePodPath(projectRoot);
+  const podCache = new Map();
+  const podScope = { allPods: opts.allPods, pods: opts.pods };
+
   if (opts.verbose) {
     process.stdout.write(`project root: ${projectRoot}\n`);
     process.stdout.write(`public dir:   ${PUBLIC_DIR}\n`);
     process.stdout.write(
       `liveness:     ${opts.docker ? 'docker' : 'log-freshness (degraded)'} (poll ${opts.poll}ms)\n`
     );
+    const scopeDesc = opts.allPods
+      ? 'all pods'
+      : opts.pods.length
+      ? `pods: ${opts.pods.join(', ')}`
+      : `self pod (${selfPodKey})`;
+    process.stdout.write(`pod scope:    ${scopeDesc}\n`);
   }
 
   const bus = createEventBus();
@@ -250,7 +276,7 @@ async function main() {
   if (opts.docker) {
     // Authoritative membership from `docker ps`.
     const pollOnce = async function () {
-      const result = await pollDocker({ cwd: projectRoot });
+      const result = await pollDocker({ cwd: projectRoot, podCache, selfPodKey, scope: podScope });
       reconciler.applyDockerPoll(result);
       // Poll-driven log re-tail on the same cadence: advance [exec]/[STEP]/[exit]
       // enrichment without depending on chokidar native fs-watch events firing

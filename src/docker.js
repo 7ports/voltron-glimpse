@@ -1,5 +1,6 @@
 const { execFile } = require('node:child_process');
 const { deriveAgentName } = require('./parsers/logs');
+const { resolvePods, selectPods } = require('./pods');
 
 const VOLTRON_PREFIX = 'voltron-';
 
@@ -58,11 +59,20 @@ function defaultExec(cwd) {
 // Poll the daemon. exec is injectable for tests (default: defaultExec).
 // On ANY failure (docker missing, daemon down, non-zero exit) returns
 // { available:false, containers:[] } and never throws.
-async function pollDocker({ cwd, exec } = {}) {
+async function pollDocker({ cwd, exec, inspectExec, podCache, selfPodKey, scope } = {}) {
   const run = typeof exec === 'function' ? exec : () => defaultExec(cwd);
   try {
     const stdout = await run({ cwd });
-    return { available: true, containers: parseDockerPs(typeof stdout === 'string' ? stdout : '') };
+    let containers = parseDockerPs(typeof stdout === 'string' ? stdout : '');
+    // Pod attribution + scoping at the source: the reconciler/state receive an
+    // already-scoped, pod-tagged list (design §3.3). Engaged only when the caller
+    // supplies a podCache (the CLI always does); callers wanting raw `docker ps`
+    // rows omit it (back-compat with the parser tests).
+    if (podCache) {
+      containers = await resolvePods(containers, { exec: inspectExec, cache: podCache });
+      containers = selectPods(containers, scope || {}, selfPodKey);
+    }
+    return { available: true, containers };
   } catch {
     return { available: false, containers: [] };
   }

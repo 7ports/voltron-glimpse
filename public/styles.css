@@ -337,6 +337,52 @@ html, body {
 }
 
 /* =============================================================
+   Pod legend (per-pod hue swatch + 'you' marker)
+   Shown only when 2+ pods are live; app.js controls visibility.
+   ============================================================= */
+
+/* Separator so the pod section reads as a distinct block */
+.pod-legend-section {
+  border-top: 1px solid var(--color-border);
+  padding-top: var(--space-2);
+  margin-top: var(--space-1);
+}
+
+/* Circular swatch — background set inline by app.js (pod hue → solid HSL) */
+.pod-swatch {
+  display: inline-block;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+/* Pod label — truncates if the basename is long */
+.pod-legend-label {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* "you" badge — cyan-tinted pill marking the self pod */
+.pod-you-badge {
+  display: inline-block;
+  padding: 1px 5px;
+  border-radius: 3px;
+  font-size: 9px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  background: rgba(0, 229, 255, 0.12);
+  border: 1px solid rgba(0, 229, 255, 0.35);
+  color: var(--color-accent);
+  line-height: 1.5;
+  flex-shrink: 0;
+}
+
+/* =============================================================
    Minimal node detail tooltip
    ============================================================= */
 .node-tooltip {

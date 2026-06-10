@@ -224,6 +224,54 @@ window.GLIMPSE_CYTO_STYLE = [
     }
   },
 
+  /* ─── Pod accent border-color ────────────────────────────────────────
+   * Per-pod hue rings are applied inline by app.js via
+   *   ele.style('border-color', podAccentColor(podKey))
+   * after every state-class change. Status fill (background-color) is the
+   * primary live-state signal; the pod hue is a secondary orthogonal channel
+   * on the border ring. No stylesheet rule is needed — inline styles take
+   * precedence over the status-class border-color values above.
+   * 'unknown' pods receive a neutral grey: rgba(136,153,170,0.55).
+  ─────────────────────────────────────────────────────────────────── */
+
+  /* ─── Pod compound-parent region ─────────────────────────────────────
+   * Solid border = REAL pod membership (mount-source derived), visually
+   * honest contrast with the dashed inferred dispatch spokes.
+   * background-color + border-color are overridden inline per pod by
+   * ensureCompoundParent() using the pod's deterministic hue.
+   * z-index: 0 keeps the parent behind its children (z-index: 10).
+   * ─────────────────────────────────────────────────────────────────── */
+  {
+    selector: 'node.pod-parent',
+    style: {
+      'shape':              'roundrectangle',
+      'background-color':   'rgba(255,255,255,0.03)',
+      'background-opacity': 1,
+      'border-width':       2,
+      'border-style':       'solid',
+      'border-color':       'rgba(136,153,170,0.35)',
+      'label':              'data(label)',
+      'text-valign':        'top',
+      'text-halign':        'center',
+      'text-margin-y':      8,
+      'color':              _C.textDim,
+      'font-size':          10,
+      'font-weight':        'bold',
+      'text-transform':     'uppercase',
+      'padding':            24,
+      'overlay-opacity':    0,
+      'z-index':            0,
+    }
+  },
+
+  /* Self-pod compound parent: warmer label color matching the gold hue */
+  {
+    selector: 'node.pod-parent.pod-self',
+    style: {
+      'color': 'hsla(45,80%,70%,0.90)',
+    }
+  },
+
   /* ─── Edge selection ─────────────────────────────────────────────────── */
   {
     selector: 'edge:selected',
