@@ -273,7 +273,7 @@ html, body {
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.06em;
-  color: var(--color-text-dim);
+  color: var(--color-text-secondary);
   margin-bottom: 2px;
 }
 
@@ -455,7 +455,7 @@ html, body {
 }
 
 .tooltip-key {
-  color: var(--color-text-dim);
+  color: var(--color-text-secondary);
   white-space: nowrap;
 }
 
