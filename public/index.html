@@ -10,174 +10,67 @@
 </head>
 <body>
 
-  <!-- Connection status badge -->
-  <div id="connection-badge" class="connection-badge disconnected" role="status" aria-live="polite">
-    <span class="connection-dot"></span>
-    <span class="connection-label">Connecting…</span>
-  </div>
-
-  <!-- Main layout grid -->
-  <div class="layout">
-
-    <!-- Left sidebar: activity feed -->
-    <aside class="sidebar" aria-label="Activity feed">
-      <div class="sidebar-header">
-        <h2 class="sidebar-title">Activity</h2>
-        <div class="filter-row" aria-label="Agent filters">
-          <span class="filter-label">Filter by agent:</span>
-          <div id="agent-filter-chips" class="chip-group" role="group" aria-label="Agent filter chips">
-            <!-- chips injected by app.js -->
-          </div>
-        </div>
-        <div class="filter-row" aria-label="Phase filters">
-          <span class="filter-label">Phase:</span>
-          <div id="phase-filter-chips" class="chip-group" role="group" aria-label="Phase filter chips">
-            <!-- chips injected by app.js -->
-          </div>
-        </div>
-      </div>
-      <ul id="activity-feed" class="activity-feed" aria-label="Activity entries" aria-live="polite">
-        <!-- feed items injected by app.js -->
-      </ul>
-    </aside>
-
-    <!-- Center: graph canvas -->
-    <main class="graph-area" aria-label="Agent graph">
-      <div id="cy" class="cy-canvas"></div>
-
-      <!-- Swim-lane backgrounds rendered behind the canvas by app.js -->
-      <div id="swimlane-labels" class="swimlane-labels" aria-hidden="true">
-        <!-- phase label overlays injected by app.js -->
-      </div>
-
-      <!-- Toolbar (fit / zoom controls) -->
-      <div class="graph-toolbar" role="toolbar" aria-label="Graph controls">
-        <button id="btn-fit" class="toolbar-btn" title="Fit all nodes" aria-label="Fit graph">⊡</button>
-        <button id="btn-zoom-in" class="toolbar-btn" title="Zoom in" aria-label="Zoom in">＋</button>
-        <button id="btn-zoom-out" class="toolbar-btn" title="Zoom out" aria-label="Zoom out">－</button>
-      </div>
-
-      <!-- Legend -->
-      <div class="legend" role="complementary" aria-label="Graph legend">
-        <div class="legend-section">
-          <div class="legend-title">Status</div>
-          <div class="legend-row"><span class="legend-swatch status-queued"></span><span>Queued</span></div>
-          <div class="legend-row"><span class="legend-swatch status-dispatching"></span><span>Dispatching</span></div>
-          <div class="legend-row"><span class="legend-swatch status-working"></span><span>Working</span></div>
-          <div class="legend-row"><span class="legend-swatch status-done"></span><span>Done</span></div>
-          <div class="legend-row"><span class="legend-swatch status-blocked"></span><span>Blocked</span></div>
-          <div class="legend-row"><span class="legend-swatch status-errored"></span><span>Errored</span></div>
-        </div>
-        <div class="legend-section">
-          <div class="legend-title">Tier (size)</div>
-          <div class="legend-row"><span class="legend-node tier1-swatch"></span><span>Tier 1 (orchestrator)</span></div>
-          <div class="legend-row"><span class="legend-node tier2-swatch"></span><span>Tier 2 (specialist)</span></div>
-          <div class="legend-row"><span class="legend-node tier3-swatch"></span><span>Tier 3 (micro)</span></div>
-        </div>
-        <div class="legend-section">
-          <div class="legend-title">Edges</div>
-          <div class="legend-row"><span class="legend-edge edge-dashed"></span><span>Inferred dispatch</span></div>
-          <div class="legend-row"><span class="legend-edge edge-solid"></span><span>Declared dependency</span></div>
-        </div>
-      </div>
-    </main>
-
-  </div><!-- /.layout -->
-
-  <!-- Bottom panel: status counts + phase progress + active-now -->
-  <div class="bottom-panel" role="complementary" aria-label="Status summary">
-    <div class="status-counts" role="list" aria-label="Status counts">
-      <div class="status-count-item" role="listitem">
-        <span class="count-dot status-queued"></span>
-        <span id="count-queued" class="count-num">0</span>
-        <span class="count-label">Queued</span>
-      </div>
-      <div class="status-count-item" role="listitem">
-        <span class="count-dot status-dispatching"></span>
-        <span id="count-dispatching" class="count-num">0</span>
-        <span class="count-label">Dispatching</span>
-      </div>
-      <div class="status-count-item" role="listitem">
-        <span class="count-dot status-working"></span>
-        <span id="count-working" class="count-num">0</span>
-        <span class="count-label">Working</span>
-      </div>
-      <div class="status-count-item" role="listitem">
-        <span class="count-dot status-done"></span>
-        <span id="count-done" class="count-num">0</span>
-        <span class="count-label">Done</span>
-      </div>
-      <div class="status-count-item" role="listitem">
-        <span class="count-dot status-blocked"></span>
-        <span id="count-blocked" class="count-num">0</span>
-        <span class="count-label">Blocked</span>
-      </div>
-      <div class="status-count-item" role="listitem">
-        <span class="count-dot status-errored"></span>
-        <span id="count-errored" class="count-num">0</span>
-        <span class="count-label">Errored</span>
-      </div>
+  <!-- Status badges: WS connection + Docker availability -->
+  <div class="status-badges">
+    <div id="connection-badge" class="connection-badge disconnected" role="status" aria-live="polite">
+      <span class="connection-dot"></span>
+      <span class="connection-label">Connecting…</span>
     </div>
-
-    <div class="divider-v" aria-hidden="true"></div>
-
-    <!-- Per-phase progress bars -->
-    <div id="phase-bars" class="phase-bars" aria-label="Phase progress">
-      <!-- injected by app.js -->
-    </div>
-
-    <div class="divider-v" aria-hidden="true"></div>
-
-    <!-- Active-now strip -->
-    <div class="active-strip" aria-label="Currently active agents" aria-live="polite">
-      <span class="active-strip-label">Active now:</span>
-      <div id="active-agents" class="active-agents">
-        <!-- injected by app.js -->
-      </div>
+    <div id="docker-badge" class="connection-badge docker-unknown" role="status" aria-live="polite">
+      <span class="connection-dot"></span>
+      <span class="connection-label">Docker…</span>
     </div>
   </div>
 
-  <!-- Node detail modal -->
-  <div id="modal-node" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="modal-node-title">
-    <div class="modal-box">
-      <div class="modal-header">
-        <h3 id="modal-node-title" class="modal-title">Agent Detail</h3>
-        <button class="modal-close" id="modal-node-close" aria-label="Close node detail">✕</button>
-      </div>
-      <div class="modal-body">
-        <div id="node-meta" class="node-meta">
-          <!-- container name, dispatch/exit time, exit code, prompt status -->
-        </div>
-        <div class="log-tail-label">Log tail (last 50 lines)</div>
-        <pre id="node-log-tail" class="log-tail" aria-label="Agent log tail"></pre>
-      </div>
+  <!-- Full-bleed graph stage -->
+  <div id="cy" aria-label="Agent graph"></div>
+
+  <!-- Graph toolbar (fit / zoom controls) -->
+  <div class="graph-toolbar" role="toolbar" aria-label="Graph controls">
+    <button id="btn-fit" class="toolbar-btn" title="Fit all nodes" aria-label="Fit graph">⊡</button>
+    <button id="btn-zoom-in" class="toolbar-btn" title="Zoom in" aria-label="Zoom in">＋</button>
+    <button id="btn-zoom-out" class="toolbar-btn" title="Zoom out" aria-label="Zoom out">－</button>
+  </div>
+
+  <!-- Reduced legend: live states + tier size + inferred-dispatch edge -->
+  <div class="legend" role="complementary" aria-label="Graph legend">
+    <div class="legend-section">
+      <div class="legend-title">Live state</div>
+      <div class="legend-row"><span class="legend-swatch status-dispatching"></span><span>Dispatching</span></div>
+      <div class="legend-row"><span class="legend-swatch status-working"></span><span>Working</span></div>
+      <div class="legend-row"><span class="legend-swatch status-exiting-done"></span><span>Exiting (ok)</span></div>
+      <div class="legend-row"><span class="legend-swatch status-exiting-errored"></span><span>Exiting (err)</span></div>
+    </div>
+    <div class="legend-section">
+      <div class="legend-title">Tier (size)</div>
+      <div class="legend-row"><span class="legend-node tier1-swatch"></span><span>Tier 1 (orchestrator)</span></div>
+      <div class="legend-row"><span class="legend-node tier2-swatch"></span><span>Tier 2 (specialist)</span></div>
+      <div class="legend-row"><span class="legend-node tier3-swatch"></span><span>Tier 3 (micro)</span></div>
+    </div>
+    <div class="legend-section">
+      <div class="legend-title">Edges</div>
+      <div class="legend-row"><span class="legend-edge edge-dashed"></span><span>Inferred dispatch</span></div>
     </div>
   </div>
 
-  <!-- Analysis markdown modal -->
-  <div id="modal-analysis" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="modal-analysis-title">
-    <div class="modal-box modal-box--wide">
-      <div class="modal-header">
-        <h3 id="modal-analysis-title" class="modal-title">Analysis</h3>
-        <button class="modal-close" id="modal-analysis-close" aria-label="Close analysis">✕</button>
-      </div>
-      <div class="modal-body">
-        <div id="analysis-content" class="analysis-content">
-          <!-- markdown rendered by app.js -->
-        </div>
-      </div>
+  <!-- Minimal node detail tooltip card — logic populated by app.js -->
+  <div id="node-tooltip" class="node-tooltip hidden" role="tooltip">
+    <div class="tooltip-header">
+      <span id="tooltip-agent" class="tooltip-agent"></span>
+      <button id="tooltip-close" class="tooltip-close" aria-label="Close detail">✕</button>
+    </div>
+    <div id="tooltip-meta" class="tooltip-meta">
+      <!-- agent, container name, dispatch time, current step, exit code -->
     </div>
   </div>
 
-  <!-- Vendor libs (order matters: dagre → cytoscape → cytoscape-dagre) -->
-  <script src="vendor/dagre.min.js"></script>
+  <!-- Cytoscape core only; concentric layout is built-in, no extra layout lib needed -->
   <script src="vendor/cytoscape.min.js"></script>
-  <script src="vendor/cytoscape-dagre.min.js"></script>
 
   <!-- Cytoscape stylesheet (exposes window.GLIMPSE_CYTO_STYLE) -->
   <script src="cytoscape-style.js"></script>
 
-  <!-- App logic (WS client, graph init, patch handling) — written separately -->
+  <!-- App logic (WS client, graph init, patch handling) -->
   <script src="app.js"></script>
 
 </body>

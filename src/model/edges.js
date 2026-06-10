@@ -1,93 +1,41 @@
-// Build the edge set for the graph from the current node set + declared
-// bead dependencies. Two visually distinct edge kinds:
-//   - 'dispatch'   inferred (dashed) — orchestrator-as-root star
-//   - 'dependency' declared (solid) — from `bd list --json` dependencies
-// Dispatch edges are inferred because dispatcher/parent relationships are
-// not recorded on disk by Voltron; only declared bead deps are authoritative.
+// Build the LIVE edge set: a synthetic orchestrator hub (`scrum-master`, the
+// host session that never appears in `docker ps`) with one inferred, dashed
+// dispatch spoke to each currently-live agent. Dispatch parentage is not
+// recorded on disk, so every spoke is inferred. Beads dependency edges and
+// orchestrator-discovery-from-disk are gone (docs/live-monitor-redesign.md
+// §3.2, §3.3, R5).
 
-const BATCH_WINDOW_MS = 3000;
-const ORCHESTRATOR_AGENTS = new Set(['scrum-master', 'code-analyst']);
+const HUB_ID = 'scrum-master';
 
-function toMs(ts) {
-  if (typeof ts === 'number' && Number.isFinite(ts)) return ts;
-  if (typeof ts === 'string' && ts.length > 0) {
-    const v = Date.parse(ts);
-    return Number.isNaN(v) ? null : v;
-  }
-  return null;
-}
-
-function pickOrchestrator(nodes) {
-  for (const n of nodes) {
-    if (n && ORCHESTRATOR_AGENTS.has(n.agent)) return n;
-  }
-  let earliest = null;
-  let earliestMs = Infinity;
-  for (const n of nodes) {
-    if (!n) continue;
-    const ms = toMs(n.startedAt);
-    if (ms !== null && ms < earliestMs) {
-      earliest = n;
-      earliestMs = ms;
+// Accepts a Map (nodeId -> entry), an array of nodeIds/entries, or a plain
+// object keyed by nodeId. Returns [] when the live set is empty — the hub only
+// exists while >= 1 agent is live (synthetic hub presence rule, §3.2).
+function nodeIdsOf(liveAgents) {
+  const ids = [];
+  if (!liveAgents) return ids;
+  if (liveAgents instanceof Map) {
+    for (const key of liveAgents.keys()) ids.push(key);
+  } else if (Array.isArray(liveAgents)) {
+    for (const a of liveAgents) {
+      if (typeof a === 'string') ids.push(a);
+      else if (a && a.nodeId) ids.push(a.nodeId);
     }
+  } else if (typeof liveAgents === 'object') {
+    for (const key of Object.keys(liveAgents)) ids.push(key);
   }
-  return earliest;
+  return ids;
 }
 
-function assignBatchGroups(nodes) {
-  const dated = nodes
-    .map((n) => ({ node: n, ms: toMs(n && n.startedAt) }))
-    .filter((x) => x.ms !== null)
-    .sort((a, b) => a.ms - b.ms);
-
-  const batchById = new Map();
-  let batchStartMs = -Infinity;
-  let batchLabel = null;
-  let batchCounter = 0;
-
-  for (const { node, ms } of dated) {
-    if (batchLabel === null || ms - batchStartMs > BATCH_WINDOW_MS) {
-      batchCounter += 1;
-      batchLabel = `batch-${batchCounter}`;
-      batchStartMs = ms;
-    }
-    batchById.set(node.id, batchLabel);
-  }
-  return batchById;
+function buildLiveEdges(liveAgents) {
+  const ids = nodeIdsOf(liveAgents);
+  if (ids.length === 0) return [];
+  return ids.map((nodeId) => ({
+    id: `${HUB_ID}->${nodeId}`,
+    source: HUB_ID,
+    target: nodeId,
+    kind: 'dispatch',
+    inferred: true,
+  }));
 }
 
-function buildEdges(nodes, beadDeps) {
-  const safeNodes = Array.isArray(nodes)
-    ? nodes.filter((n) => n && typeof n.id === 'string')
-    : [];
-  const safeDeps = Array.isArray(beadDeps) ? beadDeps : [];
-  const edges = [];
-
-  if (safeNodes.length > 0) {
-    const orchestrator = pickOrchestrator(safeNodes);
-    if (orchestrator) {
-      const batchById = assignBatchGroups(safeNodes);
-      for (const n of safeNodes) {
-        if (n.id === orchestrator.id) continue;
-        edges.push({
-          from: orchestrator.id,
-          to: n.id,
-          kind: 'dispatch',
-          inferred: true,
-          batchGroup: batchById.get(n.id) || null,
-        });
-      }
-    }
-  }
-
-  for (const dep of safeDeps) {
-    if (!dep || typeof dep !== 'object') continue;
-    const { from, to } = dep;
-    if (typeof from !== 'string' || typeof to !== 'string') continue;
-    edges.push({ from, to, kind: 'dependency', declared: true });
-  }
-
-  return edges;
-}
-
-module.exports = { buildEdges };
+module.exports = { buildLiveEdges, HUB_ID };

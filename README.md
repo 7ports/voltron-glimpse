@@ -1,17 +1,17 @@
 # voltron-glimpse
 
-Real-time, read-only graph dashboard for Project Voltron agent runs. Run it at the root of
-any Voltron project and a browser opens to a live visualization: one node per dispatched
-agent, color-coded by status, sized by tier, wired by dispatch and dependency edges, grouped
-into phase swim-lanes, with a scrolling journal feed and click-through detail panels. Glimpse
-is strictly an observer — it never writes to `.voltron/` or `.beads/`, never modifies
-Voltron templates, and only serves on `127.0.0.1`.
+Real-time, read-only visualization of the Voltron agents whose Docker containers are
+**currently running**, and the (inferred) dispatch connections between them. Run it at
+the root of any Voltron project and a browser opens to a live animated graph: one node
+per running container, pulsing while active, exiting when the container stops. Glimpse
+is strictly an observer — it never writes to `.voltron/` or `.beads/`, and only serves
+on `127.0.0.1`.
 
 ---
 
 ## Install
 
-**Node 20 LTS or newer required.**
+**Node 20 LTS or newer required. Docker must be available on the host for primary mode.**
 
 ```bash
 npm i -g voltron-glimpse
@@ -29,14 +29,19 @@ npx voltron-glimpse
 
 Run `voltron-glimpse` at the root of any Voltron project (or anywhere inside one).
 It walks up the directory tree to find the nearest ancestor that contains a `.voltron/`
-directory, then starts the dashboard and opens a browser tab automatically.
+directory, then starts the monitor and opens a browser tab automatically.
 
 ```bash
 cd /path/to/your-voltron-project
 voltron-glimpse
 # → voltron-glimpse  →  http://127.0.0.1:7424
-# → watching /path/to/your-voltron-project/.voltron (read-only)
+# → watching /path/to/your-voltron-project/.voltron/logs (read-only)
 ```
+
+Glimpse queries the host Docker daemon every second for containers named `voltron-*`.
+When an agent's container starts, a node appears and animates in; while it runs it
+pulses; when the container exits, the node winds down and disappears. An empty canvas
+when nothing is running is the correct behavior, not a bug.
 
 The process runs in the foreground. Press **Ctrl-C** to stop.
 
@@ -49,99 +54,70 @@ The process runs in the foreground. Press **Ctrl-C** to stop.
 | `--port <n>` | `7424` | Port to bind the HTTP + WS server. If the port is in use, Glimpse auto-increments until it finds a free one (up to +50). |
 | `--no-open` | *(browser opens)* | Skip auto-launching the browser. Print the URL instead. |
 | `--root <path>` | *(auto-detect)* | Override project root detection. Pass the directory that contains `.voltron/`. |
-| `--docker` | `false` | Enable live Docker container introspection via `docker ps`. Off by default. See [Limitations](#limitations). |
-| `--verbose` | `false` | Print the resolved project root, public directory, and other startup details to stdout. |
+| `--docker` | `on` | Use Docker daemon introspection for liveness (the primary mode, on by default). |
+| `--no-docker` | | Skip Docker; infer liveness from log-file freshness instead. **Degraded mode** — a stalled-but-alive container with no log output may be missed. A "Docker unavailable" badge appears in the UI. |
+| `--poll <ms>` | `1000` | Docker poll cadence in milliseconds. |
+| `--verbose` | `false` | Print the resolved project root, public directory, and liveness mode to stdout. |
 | `-h`, `--help` | | Print the help text and exit. |
 
 ---
 
 ## What it shows
 
-**Graph canvas (center)**
-- One node per dispatched agent instance (each log file = one dispatch = one node).
-- **Status colors:** grey = queued · blue = dispatching · green + pulse = working · solid
-  green = done · orange = blocked · red = errored/failed.
-- **Node size:** Tier 1 orchestrators are largest, Tier 2 sub-managers medium, Tier 3
-  micro-agents smallest.
-- **Phase swim-lanes:** nodes grouped horizontally by their `progress.json` phase string.
-  Tasks with no phase appear in an "Unphased" lane.
-- **Dispatch edges (dashed, inferred):** a star from the orchestrator to each dispatched
-  agent. Animated ripple while the target is working. These edges are *inferred* from
-  timing — see [Limitations](#limitations).
-- **Dependency edges (solid, declared):** from `bd list --json` dependency records. These
-  reflect actual bead task-ordering constraints.
+**Graph canvas (full screen)**
+- One node per currently-running `voltron-*` Docker container.
+- **Live states:** dim blue = dispatching (container up, not yet exec'd) · **vivid green + pulse = working** · bright green flash → fade = just finished (clean) · red flash → fade = just finished (error).
+- **Node size:** Tier 1 orchestrators largest, Tier 2 sub-managers medium, Tier 3 micro-agents smallest.
+- **Dispatch edges (dashed, inferred):** a spoke from the synthetic `scrum-master` hub to each live agent. Animated marching-ants while the target is working. These edges are *inferred* from timing — parentage is not recorded on disk. A legend in the dashboard labels them "inferred dispatch."
+- **Animations:** nodes entrance-ripple on arrival, breathe while working (phase-jittered per node), and wind down with a terminal flash on exit (~2.5 s linger so you perceive the finish).
+- **Docker availability badge:** shows whether Docker introspection is active or whether Glimpse has fallen back to log-freshness mode.
 
-**Left sidebar — live journal feed**
-- Scrolling activity stream from `.voltron/journal/*.md`, newest entries at top.
-- Each entry shows time (`HH:MM`), an emoji for the event kind, agent name, and text.
-- Filter by agent (multi-select chips) or by phase.
-
-**Bottom panel — status & phases**
-- Live tallies: queued / dispatching / working / done / blocked / failed.
-- Per-phase progress bars (done vs total tasks in that phase).
-- "Active now" strip showing currently-working agents and their latest step.
-
-**Node click → detail modal**
-- Log tail (last 50 lines of that agent's `.log` file).
-- Prompt metadata: container name, dispatch time, exit time, exit code. If the prompt file
-  in `.voltron/tmp/` is still present (live dispatch), its content is shown; otherwise
-  "prompt not retained" (Voltron deletes prompt files immediately after dispatch).
-- Container info: name from log filename; live status only if `--docker` is enabled.
-
-**Analysis indicator**
-- When an `analyses/*.md` report exists, an indicator appears on the related node (or top
-  bar). Clicking it renders the full analysis markdown in a modal.
+**Node hover/click — minimal detail card**
+- Agent name, container name, dispatch time.
+- Current `[STEP N]` / `[DONE]` label from the log tail (best-effort).
+- Exit code if the node is in wind-down.
 
 ---
 
 ## Limitations
 
-These are honest constraints, not roadmap items. Design decisions made to accommodate them
-are documented in `docs/implementation-plan.md §3`.
+These are honest constraints, not roadmap items.
 
 1. **Strictly read-only.** Glimpse never writes, appends, or deletes any file under
-   `.voltron/` or `.beads/`. It will not modify Voltron templates or aggregated state.
+   `.voltron/` or `.beads/`. It queries `docker ps` (read) and tails log files (read). It
+   will not modify Voltron templates or aggregated state.
 
-2. **Dispatch edges are inferred, not declared.** Voltron does not record parent/child
-   dispatch relationships to disk. Dashed edges are *inferred* from timing (which agent
-   started the run, batch-dispatch windows). Solid edges are *declared* bead dependencies
-   read from `bd list --json`. A legend in the dashboard distinguishes the two. Do not treat
-   inferred edges as authoritative.
+2. **Only currently-running agents are shown.** Glimpse is present-tense and ephemeral —
+   it shows what is live *right now*, not history. Agents that have already finished are
+   not shown, even if their log files remain on disk.
 
-3. **The tier map is a baked-in snapshot.** Agent tiers (Tier 1 / 2 / 3) are not stored on
-   disk by Voltron. Glimpse ships a frozen copy of the tier tables from Voltron's templates.
-   Unknown agents default to Tier 3. If Voltron adds new agents between Glimpse releases,
-   they will render at Tier 3 size until the snapshot is refreshed.
+3. **Dispatch edges are inferred, not declared.** Voltron does not record parent/child
+   dispatch relationships to disk. All edges are inferred from timing and drawn as dashed
+   lines labeled "inferred." Do not treat them as authoritative.
 
-4. **Beads / Dolt features degrade gracefully.** Beads uses a Dolt database, not a flat
-   file. Glimpse watches `.beads/interactions.jsonl` as a change signal and re-runs
-   `bd list --json` on each change. If `bd` is not on PATH, or if the Dolt server is down
-   (common on Windows after reboot), dependency edges are simply absent. All other features
-   — dispatch edges, status colors, journal feed — continue working.
+4. **The tier map is a baked-in snapshot.** Agent tiers are not stored on disk by Voltron.
+   Glimpse ships a frozen copy of the tier table. Unknown agents default to Tier 3 until
+   the snapshot is refreshed.
 
-5. **Localhost-only; no auth, no remote exposure.** The HTTP server and WebSocket server
-   bind to `127.0.0.1` only. There is no TLS, no authentication, and no intent to expose
-   the dashboard remotely. Do not run behind a reverse proxy that forwards external traffic.
+5. **`--no-docker` mode is approximate.** Without Docker, liveness is inferred from
+   log-file modification time. A stalled-but-alive container with no log output may be
+   missed; a crashed container with no `[exit]` line may linger until the freshness window
+   expires. The UI shows a clear badge when operating in this degraded mode.
 
-6. **No history beyond what `.voltron/` holds.** Glimpse reads the on-disk run artifacts as
-   they exist. It does not persist its own history database. Restarting Glimpse re-reads the
-   same files from scratch.
+6. **Localhost-only; no auth, no remote exposure.** HTTP and WebSocket servers bind to
+   `127.0.0.1` only. There is no TLS, no authentication, and no intent to expose the
+   monitor remotely.
 
-7. **Live Docker introspection is opt-in (`--docker`).** Without `--docker`, "done/failed"
-   status comes from `[exit] code=` in the log file. With `--docker`, Glimpse additionally
-   queries `docker ps` for live container status. This is off by default to keep Glimpse
-   file-based and read-only by default.
-
-8. **Step labels are best-effort.** Many agents (e.g. `committer`) never emit `[STEP N]`
-   lines. Node labels fall back to phase/status when no step is present.
+7. **Step labels are best-effort.** Many micro-agents never emit `[STEP N]` lines. Node
+   labels fall back to the agent name + "running" when no step is present.
 
 ---
 
 ## Contributing
 
-This project follows the Voltron Glimpse implementation plan in `docs/implementation-plan.md`.
-The code is CommonJS Node.js with no build step. Vendored frontend libraries live in
-`public/vendor/`. Run tests with:
+This project follows the redesign spec in `docs/live-monitor-redesign.md`. The code is
+CommonJS Node.js with no build step. Vendored frontend libraries live in `public/vendor/`.
+Run tests with:
 
 ```bash
 npm test

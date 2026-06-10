@@ -4,39 +4,27 @@ const fs = require('fs');
 const path = require('path');
 const chokidar = require('chokidar');
 
-const { parseProgress } = require('./parsers/progress');
-const { parseJournal } = require('./parsers/journal');
 const { tailLog } = require('./parsers/logs');
-const { indexAnalysis } = require('./parsers/analyses');
-const { loadBeads } = require('./parsers/beads');
 
 const DEBOUNCE_MS = 120;
-const BEADS_DEBOUNCE_MS = 400;
 
-function createWatcher(projectRoot, bus) {
+// Logs-only watcher. Watches `.voltron/logs/*.log` under the project root and,
+// on each appended chunk, hands the parsed live-state payload to `onLogEvent`
+// (the CLI wires that to liveness.applyLogEvent). All routing for progress.json,
+// journal/, analyses/, and .beads/ is gone (docs/live-monitor-redesign.md §5.1,
+// watcher.js → gut). Offsets are tracked so only new bytes are parsed; historical
+// log content is skipped at startup (present-tense rule, §2.5).
+function createWatcher(projectRoot, onLogEvent) {
   if (!projectRoot || typeof projectRoot !== 'string') {
     throw new Error('createWatcher: projectRoot (string) is required');
   }
-  if (!bus || typeof bus.emit !== 'function') {
-    throw new Error('createWatcher: bus with emit() is required');
+  if (typeof onLogEvent !== 'function') {
+    throw new Error('createWatcher: onLogEvent callback is required');
   }
 
-  const voltronDir = path.join(projectRoot, '.voltron');
-  const progressFile = path.join(voltronDir, 'progress.json');
-  const journalDir = path.join(voltronDir, 'journal');
-  const logsDir = path.join(voltronDir, 'logs');
-  const analysesDir = path.join(voltronDir, 'analyses');
-  const beadsFile = path.join(projectRoot, '.beads', 'interactions.jsonl');
-
+  const logsDir = path.join(projectRoot, '.voltron', 'logs');
   const logOffsets = new Map();
   const timers = new Map();
-
-  function emitAll(events) {
-    if (!Array.isArray(events)) return;
-    for (const evt of events) {
-      if (evt && evt.event) bus.emit(evt.event, evt.payload);
-    }
-  }
 
   function debounce(key, ms, fn) {
     const existing = timers.get(key);
@@ -53,100 +41,45 @@ function createWatcher(projectRoot, bus) {
     timers.set(key, t);
   }
 
-  function handleProgress() {
-    let raw;
-    try {
-      raw = fs.readFileSync(progressFile, 'utf8');
-    } catch (_e) {
-      return;
-    }
-    emitAll(parseProgress(raw));
-  }
-
-  function handleJournal(file) {
-    let raw;
-    try {
-      raw = fs.readFileSync(file, 'utf8');
-    } catch (_e) {
-      return;
-    }
-    emitAll(parseJournal(raw, file));
-  }
-
   function handleLog(file) {
     const from = logOffsets.get(file) || 0;
-    const { events, newOffset } = tailLog(file, from);
+    const { event, newOffset } = tailLog(file, from);
     logOffsets.set(file, newOffset);
-    emitAll(events);
-  }
-
-  function handleAnalysis(file) {
-    try {
-      emitAll([indexAnalysis(file)]);
-    } catch (_e) {
-      /* ignore */
-    }
-  }
-
-  function handleBeads() {
-    emitAll(loadBeads(projectRoot));
+    if (event) onLogEvent(event);
   }
 
   function route(file) {
     const resolved = path.resolve(file);
-    if (resolved === path.resolve(progressFile)) {
-      debounce(resolved, DEBOUNCE_MS, handleProgress);
-      return;
-    }
-    if (resolved === path.resolve(beadsFile)) {
-      debounce(resolved, BEADS_DEBOUNCE_MS, handleBeads);
-      return;
-    }
     const dir = path.dirname(resolved);
     const ext = path.extname(resolved).toLowerCase();
-    if (dir === path.resolve(journalDir) && ext === '.md') {
-      debounce(resolved, DEBOUNCE_MS, function () {
-        handleJournal(resolved);
-      });
-      return;
-    }
     if (dir === path.resolve(logsDir) && ext === '.log') {
       debounce(resolved, DEBOUNCE_MS, function () {
         handleLog(resolved);
       });
-      return;
-    }
-    if (dir === path.resolve(analysesDir) && ext === '.md') {
-      debounce(resolved, DEBOUNCE_MS, function () {
-        handleAnalysis(resolved);
-      });
     }
   }
 
-  function scanDir(dir, ext, handler) {
+  // Seed offsets to current size so the first post-startup append is tailed
+  // from end-of-file — historical log content is not replayed.
+  function scanExisting() {
     let entries;
     try {
-      entries = fs.readdirSync(dir);
+      entries = fs.readdirSync(logsDir);
     } catch (_e) {
-      return;
+      return; // logs dir may not exist yet — tolerate it
     }
     for (const name of entries) {
-      if (path.extname(name).toLowerCase() !== ext) continue;
-      handler(path.join(dir, name));
+      if (path.extname(name).toLowerCase() !== '.log') continue;
+      const resolved = path.resolve(path.join(logsDir, name));
+      try {
+        logOffsets.set(resolved, fs.statSync(resolved).size);
+      } catch (_e) {
+        /* ignore unreadable entries */
+      }
     }
   }
 
-  function scanExisting() {
-    if (fs.existsSync(progressFile)) handleProgress();
-    scanDir(journalDir, '.md', handleJournal);
-    scanDir(logsDir, '.log', handleLog);
-    scanDir(analysesDir, '.md', handleAnalysis);
-    if (fs.existsSync(beadsFile)) handleBeads();
-  }
-
-  const watchTargets = [progressFile, journalDir, logsDir, analysesDir, beadsFile];
-
-  const watcher = chokidar.watch(watchTargets, {
+  const watcher = chokidar.watch(logsDir, {
     ignoreInitial: true,
     persistent: true,
     awaitWriteFinish: { stabilityThreshold: 80, pollInterval: 20 },
@@ -155,7 +88,7 @@ function createWatcher(projectRoot, bus) {
   watcher.on('add', route);
   watcher.on('change', route);
   watcher.on('error', function () {
-    /* tolerate watch errors (missing dirs, EPERM on Windows) */
+    /* tolerate watch errors (missing dir, EPERM on Windows) */
   });
 
   function close() {

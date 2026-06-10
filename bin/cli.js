@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 'use strict';
 
+const fs = require('fs');
 const path = require('path');
 const open = require('open');
 
@@ -10,8 +11,12 @@ const { StateModel } = require('../src/state');
 const { createHttpServer } = require('../src/transport/httpServer');
 const { createWsServer } = require('../src/transport/wsServer');
 const { createWatcher } = require('../src/watcher');
+const { pollDocker } = require('../src/docker');
+const { createReconciler, HUB_ID } = require('../src/liveness');
+const { parseLog } = require('../src/parsers/logs');
 
 const DEFAULT_PORT = 7424;
+const DEFAULT_POLL_MS = 1000;
 const HOST = '127.0.0.1';
 const PUBLIC_DIR = path.join(__dirname, '..', 'public');
 const MAX_PORT_TRIES = 50;
@@ -24,7 +29,7 @@ function fail(msg) {
 function printHelp() {
   process.stdout.write(
     [
-      'voltron-glimpse — real-time, read-only Voltron run visualizer',
+      'voltron-glimpse — live, read-only Voltron running-agent monitor',
       '',
       'Usage: voltron-glimpse [options]',
       '',
@@ -32,7 +37,9 @@ function printHelp() {
       '  --port <n>    Port to bind (default 7424; auto-increments if taken)',
       '  --no-open     Do not open the dashboard in a browser',
       '  --root <path> Project root (defaults to nearest ancestor with .voltron/)',
-      '  --docker      Enable docker introspection (stub; reserved)',
+      '  --docker      Use Docker introspection for liveness (default: on)',
+      '  --no-docker   Skip Docker; infer liveness from log freshness (degraded)',
+      '  --poll <ms>   Docker/log poll cadence in ms (default 1000)',
       '  --verbose     Verbose logging',
       '  -h, --help    Show this help',
       '',
@@ -45,7 +52,8 @@ function parseArgs(argv) {
     port: DEFAULT_PORT,
     open: true,
     root: null,
-    docker: false,
+    docker: true, // Docker is the default, primary liveness path now.
+    poll: DEFAULT_POLL_MS,
     verbose: false,
   };
   for (let i = 0; i < argv.length; i++) {
@@ -72,6 +80,18 @@ function parseArgs(argv) {
       case '--docker':
         opts.docker = true;
         break;
+      case '--no-docker':
+        opts.docker = false;
+        break;
+      case '--poll': {
+        const v = argv[++i];
+        const n = Number.parseInt(v, 10);
+        if (!Number.isInteger(n) || n < 1) {
+          fail(`invalid --poll value: ${v}`);
+        }
+        opts.poll = n;
+        break;
+      }
       case '--verbose':
         opts.verbose = true;
         break;
@@ -120,6 +140,43 @@ async function listenWithFallback(server, startPort, host) {
   throw new Error(`no free port found in range ${startPort}-${startPort + MAX_PORT_TRIES}`);
 }
 
+// Degraded fallback (--no-docker): scan `.voltron/logs/*.log`, parse each, and
+// build log-freshness entries (mtime-based) for the reconciler. See §2.5.
+function scanLogsForFreshness(logsDir) {
+  let entries;
+  try {
+    entries = fs.readdirSync(logsDir);
+  } catch (_e) {
+    return [];
+  }
+  const out = [];
+  for (const name of entries) {
+    if (path.extname(name).toLowerCase() !== '.log') continue;
+    const file = path.join(logsDir, name);
+    let content;
+    let mtimeMs;
+    try {
+      content = fs.readFileSync(file, 'utf8');
+      mtimeMs = fs.statSync(file).mtimeMs;
+    } catch (_e) {
+      continue;
+    }
+    const parsed = parseLog(content, file);
+    if (!parsed) continue;
+    out.push({
+      nodeId: parsed.nodeId,
+      agent: parsed.agent,
+      containerName: parsed.containerName,
+      createdAt: null,
+      state: parsed.state,
+      exitCode: parsed.exitCode,
+      hasExec: parsed.state === 'working',
+      mtimeMs,
+    });
+  }
+  return out;
+}
+
 async function main() {
   const opts = parseArgs(process.argv.slice(2));
 
@@ -129,12 +186,14 @@ async function main() {
     fail('no .voltron/ found — run inside a Voltron project (or pass --root <path>)');
   }
 
+  const logsDir = path.join(projectRoot, '.voltron', 'logs');
+
   if (opts.verbose) {
     process.stdout.write(`project root: ${projectRoot}\n`);
     process.stdout.write(`public dir:   ${PUBLIC_DIR}\n`);
-    if (opts.docker) {
-      process.stdout.write('docker introspection: enabled (stub — no-op for now)\n');
-    }
+    process.stdout.write(
+      `liveness:     ${opts.docker ? 'docker' : 'log-freshness (degraded)'} (poll ${opts.poll}ms)\n`
+    );
   }
 
   const bus = createEventBus();
@@ -146,6 +205,8 @@ async function main() {
     });
   }
 
+  const reconciler = createReconciler({ bus });
+
   const httpServer = createHttpServer(PUBLIC_DIR);
   const wsServer = createWsServer(httpServer, state, bus);
 
@@ -156,13 +217,47 @@ async function main() {
     fail(`failed to bind HTTP server: ${err && err.message ? err.message : err}`);
   }
 
-  const watcher = createWatcher(projectRoot, bus);
-  // Populate the first snapshot from whatever already exists on disk.
+  // Logs watcher (both modes): enrich live nodes with [exec]/[STEP]/[exit].
+  const watcher = createWatcher(projectRoot, function (parsed) {
+    reconciler.applyLogEvent(parsed);
+  });
   watcher.scanExisting();
+
+  let pollTimer = null;
+  let lastAvailable = null;
+
+  if (opts.docker) {
+    // Authoritative membership from `docker ps`.
+    const pollOnce = async function () {
+      const result = await pollDocker({ cwd: projectRoot });
+      reconciler.applyDockerPoll(result);
+      // Propagate Docker availability to the WS snapshot even when membership
+      // is unchanged (e.g. daemon up but no containers running).
+      if (result.available !== lastAvailable) {
+        lastAvailable = result.available;
+        const snap = reconciler.snapshot();
+        bus.emit(EVENTS.EDGE_UPDATE, {
+          hub: snap.edges.length > 0 ? HUB_ID : null,
+          edges: snap.edges,
+          dockerAvailable: snap.dockerAvailable,
+        });
+      }
+    };
+    pollOnce();
+    pollTimer = setInterval(pollOnce, opts.poll);
+  } else {
+    // Degraded: infer membership from log freshness on the same cadence.
+    const freshOnce = function () {
+      reconciler.applyLogFreshness(scanLogsForFreshness(logsDir));
+    };
+    freshOnce();
+    pollTimer = setInterval(freshOnce, opts.poll);
+  }
+  if (pollTimer && typeof pollTimer.unref === 'function') pollTimer.unref();
 
   const url = `http://${HOST}:${port}`;
   process.stdout.write(`voltron-glimpse  →  ${url}\n`);
-  process.stdout.write(`watching ${path.join(projectRoot, '.voltron')} (read-only)\n`);
+  process.stdout.write(`watching ${logsDir} (read-only)\n`);
 
   if (opts.open) {
     Promise.resolve(open(url)).catch(function () {
@@ -174,6 +269,7 @@ async function main() {
   function shutdown() {
     if (closing) return;
     closing = true;
+    if (pollTimer) clearInterval(pollTimer);
     process.stdout.write('\nvoltron-glimpse: shutting down…\n');
     Promise.resolve()
       .then(function () {

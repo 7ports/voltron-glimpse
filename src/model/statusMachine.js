@@ -1,56 +1,44 @@
-// Derive a node's visual state by combining progress.json status with log
-// signals. Precedence (highest first):
-//   errored > blocked > done > working > dispatching > queued
-// When both a log signal and a progress signal are present, the log wins
-// unless progress carries a higher-precedence state (errored / blocked).
+// Derive a node's LIVE visual state from log signals. The work-tracking model
+// (queued/blocked/static-done) is gone (docs/live-monitor-redesign.md R2/§2.4);
+// only states that describe a live or just-finished container remain:
+//
+//   dispatching      container up, no [exec] yet (transient)
+//   working          [exec] seen / actively stepping (the dominant state)
+//   exiting:done     finished cleanly (exit code 0, or a Docker drop)
+//   exiting:errored  finished with failure (exit code != 0)
+//
+// This mirrors how src/liveness.js sets state inline, kept here as a single
+// reusable helper.
 
 const STATES = Object.freeze({
-  QUEUED: 'queued',
   DISPATCHING: 'dispatching',
   WORKING: 'working',
-  DONE: 'done',
-  BLOCKED: 'blocked',
-  ERRORED: 'errored',
+  EXITING_DONE: 'exiting:done',
+  EXITING_ERRORED: 'exiting:errored',
 });
 
-const PROGRESS_TO_STATE = Object.freeze({
-  queued: 'queued',
-  in_progress: 'working',
-  completed: 'done',
-  blocked: 'blocked',
-  failed: 'errored',
-});
+const STEP_RE = /^\[(STEP|DONE)\b/;
 
-function logCandidate(logState, exitCode) {
-  if (logState === 'errored') return 'errored';
-  if (logState === 'done') return 'done';
-  if (logState === 'working') return 'working';
-  if (logState === 'dispatching') return 'dispatching';
-  if (typeof exitCode === 'number') {
-    if (exitCode !== 0) return 'errored';
-    return 'done';
-  }
-  return null;
-}
-
-function progressCandidate(progressStatus) {
-  if (typeof progressStatus !== 'string') return null;
-  return PROGRESS_TO_STATE[progressStatus] || null;
-}
-
+// input: { logState, exitCode, hasExec, latestStep }
+//   logState   one of 'dispatching'|'working'|'done'|'errored'|null (from logs parser)
+//   exitCode   number | null  (an [exit] code, authoritative for exit coloring)
+//   hasExec    boolean        (an [exec] line was seen)
+//   latestStep string | null  (a [STEP]/[DONE] label implies work is happening)
 function deriveState(input) {
-  const { progressStatus, logState, exitCode } = input || {};
-  const fromLog = logCandidate(logState, exitCode);
-  const fromProgress = progressCandidate(progressStatus);
+  const { logState, exitCode, hasExec, latestStep } = input || {};
 
-  // Highest-precedence states win regardless of source.
-  if (fromLog === 'errored' || fromProgress === 'errored') return 'errored';
-  if (fromProgress === 'blocked') return 'blocked';
+  // Exit signals win — a concrete code colors the wind-down.
+  if (exitCode !== null && exitCode !== undefined && Number.isFinite(exitCode)) {
+    return exitCode === 0 ? STATES.EXITING_DONE : STATES.EXITING_ERRORED;
+  }
+  if (logState === 'errored') return STATES.EXITING_ERRORED;
+  if (logState === 'done') return STATES.EXITING_DONE;
 
-  // Below errored/blocked: log signal wins when present (progress may be stale).
-  if (fromLog) return fromLog;
-  if (fromProgress) return fromProgress;
-  return 'queued';
+  const stepping = typeof latestStep === 'string' && STEP_RE.test(latestStep);
+  if (logState === 'working' || hasExec === true || stepping) {
+    return STATES.WORKING;
+  }
+  return STATES.DISPATCHING;
 }
 
 module.exports = { deriveState, STATES };

@@ -23,12 +23,12 @@ Verify all three by running `mcp__project-voltron__setup_voltron` — it hard-fa
 
 **Project Name:** Voltron Glimpse
 **Type:** Standalone Node CLI + localhost web dashboard (read-only observer)
-**Tech Stack:** Node.js (vanilla JS, no build step) · `chokidar` · `ws` · `open` · Cytoscape.js + cytoscape-dagre (vendored, offline) on the frontend
+**Tech Stack:** Node.js (vanilla JS, no build step) · `chokidar` · `ws` · `open` · Cytoscape.js (vendored, offline; concentric layout, no dagre) on the frontend
 **Node Version:** 20 LTS
 **Package Manager:** npm
 **Status:** Prototype (greenfield — being implemented from `docs/` plan)
 
-**What it is:** A real-time, read-only visualizer companion for Project Voltron. Run `voltron-glimpse` at the root of any Voltron project → it auto-detects the project root (nearest ancestor with `.voltron/`), watches on-disk run artifacts, and serves a live graph dashboard on `127.0.0.1`: one node per dispatched agent, color-coded by status, sized by tier, wired by inferred dispatch + declared bead-dependency edges, grouped into phase swim-lanes, with a live journal feed and drill-down panels.
+**What it is:** A real-time, read-only live monitor for Project Voltron. Run `voltron-glimpse` at the root of any Voltron project → it queries the host Docker daemon for `voltron-*` containers and shows them as an animated graph on `127.0.0.1`: one node per currently-running specialist container, pulsing while active, appearing on container start and winding down on container exit. Nodes are sized by tier; inferred dispatch spokes (dashed, animated) hang off a synthetic `scrum-master` hub. The view is present-tense and ephemeral — it is not a work tracker or history browser.
 
 **Hard constraints (non-negotiable):** strictly an observer — NEVER writes any path under `.voltron/` or `.beads/`; no Voltron template changes; no multi-project aggregation; no history beyond what `.voltron/` holds; no auth/encryption/remote exposure (bind HTTP + WS to `127.0.0.1` only). The full implementation plan lives in `docs/implementation-plan.md`.
 
@@ -38,32 +38,33 @@ Verify all three by running `mcp__project-voltron__setup_voltron` — it hard-fa
 
 ```
 bin/
-  cli.js              <- arg parse, root detection, wire watcher→bus→state→servers, open browser
+  cli.js              <- arg parse, root detection, wire docker-poller+watcher→reconciler→bus→state→servers, open browser
 src/
   projectRoot.js      <- resolveProjectRoot(startDir): walk up to find .voltron/
-  watcher.js          <- chokidar setup; emits raw {kind,file} → normalizers
-  eventBus.js         <- tiny EventEmitter wrapper + event-name constants
-  state.js            <- StateModel: apply normalized events, expose snapshot()
+  docker.js           <- pollDocker({cwd}): shell `docker ps --filter name=voltron-`, parse rows, detect daemon-unavailable
+  liveness.js         <- reconciler: diffs docker-poll sets + log events → agent:enter/update/exit; owns linger timer + log-freshness fallback
+  watcher.js          <- chokidar on .voltron/logs/*.log only; offset-tracking tail; emits [exec]/[STEP]/[exit] to reconciler
+  eventBus.js         <- tiny EventEmitter wrapper; event-name constants: AGENT_ENTER, AGENT_UPDATE, AGENT_EXIT, EDGE_UPDATE
+  state.js            <- StateModel: { liveAgents, edges, dockerAvailable }; applyEvent(); snapshot()
   transport/
-    wsServer.js       <- ws server, snapshot-on-connect, broadcast(patch)
+    wsServer.js       <- ws server, snapshot-on-connect, broadcast deltas
     httpServer.js     <- static file server for public/
   parsers/
-    progress.js       <- progress.json → agent/phase/status/counts events
-    journal.js        <- journal/*.md tail → journal:append events
-    logs.js           <- logs/*.log tail → agent lifecycle/step/exit events
-    analyses.js       <- analyses/*.md → analysis:add (metadata) + lazy markdown read
-    beads.js          <- interactions.jsonl change → debounce → `bd list --json` → edges/deps
+    logs.js           <- logs/*.log tail → agent lifecycle/step/exit events (container-name + agent-name derivation)
   model/
     tiers.js          <- baked-in agent→tier map + getTier(name) default 3
-    statusMachine.js  <- derive node visual-state from progress + log signals
-    edges.js          <- build star + batch-group + beads-dep edges
+    statusMachine.js  <- 4 live states: dispatching / working / exiting:done / exiting:errored
+    edges.js          <- synthetic hub + inferred dispatch spokes + batch-affinity metadata for live set only
 public/               <- build-free frontend: index.html, app.js, cytoscape-style.js, styles.css
-  vendor/             <- cytoscape.min.js, cytoscape-dagre.min.js, dagre.min.js (bundled, offline)
+  vendor/             <- cytoscape.min.js (bundled, offline; concentric layout is in core — no dagre needed)
 test/
-  parsers.test.js     <- fixture-driven parser unit tests (node:test)
-  fixtures/           <- real samples copied read-only from project-voltron/.voltron/
+  logs.test.js        <- log-parser unit tests (node:test)
+  docker.test.js      <- pollDocker row-parsing tests against docker-ps.txt fixture
+  liveness.test.js    <- reconciler tests with scripted poll sets + log events (fake clock)
+  fixtures/           <- docker-ps.txt, sample .voltron/logs/ entries
 docs/
-  implementation-plan.md  <- the full plan this project implements
+  implementation-plan.md      <- original plan
+  live-monitor-redesign.md    <- authoritative redesign spec (supersedes §6-§7 of implementation-plan)
 ```
 
 **Rule:** Keep file parsing decoupled from transport via the StateModel + EventBus. Parsers normalize raw fs events into domain events; the StateModel is the single in-memory source of truth; transport just snapshots/broadcasts. No business logic in transport.
@@ -86,7 +87,7 @@ docs/
 **Backend / read-only discipline:**
 - Servers bind to `127.0.0.1` ONLY — never `0.0.0.0`
 - NEVER call `fs.write*`/`appendFile`/`mkdir`/`rm` against any path under `.voltron/` or `.beads/`
-- Shell out to `bd list --json` (cwd = project root) only as a read; degrade gracefully if `bd` is absent
+- Shell out to `docker ps` (read-only) only; degrade gracefully via `--no-docker` log-freshness fallback
 - Debounce watchers; tail logs by tracking file offsets, don't re-parse whole files on each change
 
 ---

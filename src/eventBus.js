@@ -1,13 +1,10 @@
 const { EventEmitter } = require('events');
 
 const EVENTS = Object.freeze({
+  AGENT_ENTER: 'agent:enter',
   AGENT_UPDATE: 'agent:update',
+  AGENT_EXIT: 'agent:exit',
   EDGE_UPDATE: 'edge:update',
-  JOURNAL_APPEND: 'journal:append',
-  PHASE_UPDATE: 'phase:update',
-  ANALYSIS_ADD: 'analysis:add',
-  COUNTS_UPDATE: 'counts:update',
-  LOG_UPDATE: 'log:update',
 });
 
 function createEventBus() {

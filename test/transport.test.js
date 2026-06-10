@@ -99,7 +99,7 @@ test('wsServer sends a snapshot on connect and broadcasts patches on bus events'
   fs.writeFileSync(path.join(tmp, 'index.html'), '<html></html>');
   const server = createHttpServer(tmp);
   const state = new StateModel();
-  state.applyEvent(EVENTS.AGENT_UPDATE, { id: 'a1', name: 'planner', status: 'working' });
+  state.applyEvent(EVENTS.AGENT_ENTER, { nodeId: 'a1', agent: 'planner', state: 'working' });
   const bus = createEventBus();
   const wsCtx = createWsServer(server, state, bus);
   let ws;
@@ -128,13 +128,16 @@ test('wsServer sends a snapshot on connect and broadcasts patches on bus events'
 
   const snap = await collector.wait((m) => m.type === 'snapshot');
   assert.ok(snap.state, 'snapshot should include state');
-  assert.ok(snap.state.agents && snap.state.agents.a1, 'snapshot should contain pre-seeded agent');
+  assert.ok(
+    snap.state.liveAgents && snap.state.liveAgents.a1,
+    'snapshot should contain pre-seeded live agent'
+  );
 
-  const patchPromise = collector.wait((m) => m.type === 'patch' && m.event === EVENTS.AGENT_UPDATE);
-  bus.emit(EVENTS.AGENT_UPDATE, { id: 'a2', name: 'fullstack', status: 'idle' });
+  const patchPromise = collector.wait((m) => m.type === 'patch' && m.event === EVENTS.AGENT_ENTER);
+  bus.emit(EVENTS.AGENT_ENTER, { nodeId: 'a2', agent: 'fullstack', state: 'dispatching' });
   const patch = await patchPromise;
-  assert.strictEqual(patch.event, EVENTS.AGENT_UPDATE);
-  assert.deepStrictEqual(patch.payload, { id: 'a2', name: 'fullstack', status: 'idle' });
+  assert.strictEqual(patch.event, EVENTS.AGENT_ENTER);
+  assert.deepStrictEqual(patch.payload, { nodeId: 'a2', agent: 'fullstack', state: 'dispatching' });
 });
 
 test('httpServer returns 404 for unknown paths', { timeout: 5000 }, async (t) => {

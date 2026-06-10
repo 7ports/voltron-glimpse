@@ -1,6 +1,5 @@
 const fs = require('node:fs');
 const path = require('node:path');
-const { EVENTS } = require('../eventBus');
 
 const RE_ENTRY = /^\[entry\]\s+(\S+)/;
 const RE_EXEC = /^\[exec\]\s+(\S+)/;
@@ -36,12 +35,16 @@ function defaultLabel(state, exitCode) {
   }
 }
 
+// Parse a full log file's content into ONE consolidated live-state payload
+// for the reconciler (src/liveness.js applyLogEvent). Returns null when the
+// filename is unusable. Shape: { nodeId, agent, state, exitCode, latestStep,
+// containerName }. `state` is null when no recognizable lifecycle line is seen.
 function parseLog(content, filename) {
   if (typeof content !== 'string' || typeof filename !== 'string') {
-    return [];
+    return null;
   }
   const containerName = deriveContainerName(filename);
-  if (!containerName) return [];
+  if (!containerName) return null;
   const agent = deriveAgentName(containerName);
   const nodeId = containerName;
 
@@ -80,32 +83,25 @@ function parseLog(content, filename) {
     latestStep = defaultLabel(state, exitCode);
   }
 
-  const payload = { nodeId, agent, state, exitCode, latestStep, containerName };
-
-  const events = [];
-  if (state !== null) {
-    events.push({ event: EVENTS.AGENT_UPDATE, payload });
-  }
-  if (latestStep !== null) {
-    events.push({ event: EVENTS.LOG_UPDATE, payload });
-  }
-  return events;
+  return { nodeId, agent, state, exitCode, latestStep, containerName };
 }
 
+// Read only the bytes appended since `fromOffset`, parse them, and return the
+// resulting payload (or null when nothing new / unreadable) plus the new offset.
 function tailLog(filePath, fromOffset = 0) {
   if (typeof filePath !== 'string' || filePath.length === 0) {
-    return { events: [], newOffset: Number(fromOffset) || 0 };
+    return { event: null, newOffset: Number(fromOffset) || 0 };
   }
   let stat;
   try {
     stat = fs.statSync(filePath);
   } catch (err) {
-    return { events: [], newOffset: Number(fromOffset) || 0 };
+    return { event: null, newOffset: Number(fromOffset) || 0 };
   }
   const size = stat.size;
   const start = Math.max(0, Number(fromOffset) || 0);
   if (start >= size) {
-    return { events: [], newOffset: size };
+    return { event: null, newOffset: size };
   }
   const length = size - start;
   const buf = Buffer.alloc(length);
@@ -115,8 +111,8 @@ function tailLog(filePath, fromOffset = 0) {
   } finally {
     fs.closeSync(fd);
   }
-  const events = parseLog(buf.toString('utf8'), filePath);
-  return { events, newOffset: size };
+  const event = parseLog(buf.toString('utf8'), filePath);
+  return { event, newOffset: size };
 }
 
 module.exports = { parseLog, tailLog, deriveContainerName, deriveAgentName };

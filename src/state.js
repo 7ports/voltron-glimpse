@@ -1,76 +1,58 @@
 const { EVENTS } = require('./eventBus');
 
+// Single in-memory source of truth for the LIVE set. The reconciler
+// (src/liveness.js) emits agent:enter / agent:update / agent:exit and a full
+// edge:update; this model folds those into a snapshot the WS layer broadcasts.
+// See docs/live-monitor-redesign.md §5.1 (state.js → gut) and §2.4.
 class StateModel {
   constructor() {
-    this.agents = {};
+    this.liveAgents = {}; // nodeId -> live agent entry
     this.edges = [];
-    this.phases = {};
-    this.journal = [];
-    this.analyses = [];
-    this.counts = {};
+    this.dockerAvailable = false;
   }
 
   snapshot() {
     return {
-      agents: JSON.parse(JSON.stringify(this.agents)),
+      liveAgents: JSON.parse(JSON.stringify(this.liveAgents)),
       edges: this.edges.map((e) => ({ ...e })),
-      phases: JSON.parse(JSON.stringify(this.phases)),
-      journal: this.journal.slice(),
-      analyses: this.analyses.slice(),
-      counts: { ...this.counts },
+      dockerAvailable: this.dockerAvailable,
     };
   }
 
   applyEvent(eventName, payload) {
+    // Any event MAY carry the current Docker availability; track it whenever present.
+    if (payload && typeof payload.dockerAvailable === 'boolean') {
+      this.dockerAvailable = payload.dockerAvailable;
+    }
+
     switch (eventName) {
+      case EVENTS.AGENT_ENTER: {
+        if (!payload || !payload.nodeId) return null;
+        const nodeId = payload.nodeId;
+        this.liveAgents[nodeId] = { ...payload };
+        return { type: 'enter', nodeId, agent: { ...this.liveAgents[nodeId] } };
+      }
       case EVENTS.AGENT_UPDATE: {
-        if (!payload || !payload.id) return null;
-        const id = payload.id;
-        this.agents[id] = { ...(this.agents[id] || {}), ...payload };
-        return { type: 'agent', id, agent: { ...this.agents[id] } };
+        if (!payload || !payload.nodeId) return null;
+        const nodeId = payload.nodeId;
+        // Live model only merges into an existing agent; an update for an
+        // unknown node (one we never saw enter) is ignored.
+        if (!this.liveAgents[nodeId]) return null;
+        this.liveAgents[nodeId] = { ...this.liveAgents[nodeId], ...payload };
+        return { type: 'update', nodeId, agent: { ...this.liveAgents[nodeId] } };
+      }
+      case EVENTS.AGENT_EXIT: {
+        if (!payload || !payload.nodeId) return null;
+        const nodeId = payload.nodeId;
+        delete this.liveAgents[nodeId];
+        return { type: 'exit', nodeId };
       }
       case EVENTS.EDGE_UPDATE: {
-        if (!payload || !payload.id) return null;
-        const idx = this.edges.findIndex((e) => e.id === payload.id);
-        if (idx >= 0) {
-          this.edges[idx] = { ...this.edges[idx], ...payload };
-        } else {
-          this.edges.push({ ...payload });
+        if (!payload) return null;
+        if (Array.isArray(payload.edges)) {
+          this.edges = payload.edges.map((e) => ({ ...e }));
         }
-        return { type: 'edge', edge: { ...payload } };
-      }
-      case EVENTS.JOURNAL_APPEND: {
-        if (!payload) return null;
-        this.journal.push(payload);
-        return { type: 'journal', entry: payload };
-      }
-      case EVENTS.PHASE_UPDATE: {
-        if (!payload || !payload.id) return null;
-        const id = payload.id;
-        this.phases[id] = { ...(this.phases[id] || {}), ...payload };
-        return { type: 'phase', id, phase: { ...this.phases[id] } };
-      }
-      case EVENTS.ANALYSIS_ADD: {
-        if (!payload) return null;
-        this.analyses.push(payload);
-        return { type: 'analysis', analysis: payload };
-      }
-      case EVENTS.COUNTS_UPDATE: {
-        if (!payload) return null;
-        this.counts = { ...this.counts, ...payload };
-        return { type: 'counts', counts: { ...this.counts } };
-      }
-      case EVENTS.LOG_UPDATE: {
-        if (!payload) return null;
-        const agentId = payload.agentId;
-        if (agentId && this.agents[agentId] && payload.line) {
-          const logs = this.agents[agentId].logs || [];
-          this.agents[agentId] = {
-            ...this.agents[agentId],
-            logs: logs.concat([payload.line]),
-          };
-        }
-        return { type: 'log', agentId: agentId || null, line: payload.line || null };
+        return { type: 'edges', edges: this.edges.map((e) => ({ ...e })) };
       }
       default:
         return null;

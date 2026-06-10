@@ -1,69 +1,55 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { deriveState } = require('../src/model/statusMachine');
+const { deriveState, STATES } = require('../src/model/statusMachine');
 
-test('errored (progress=failed) beats done (log=done)', () => {
+test('exposes exactly the four live states', () => {
+  assert.deepEqual(Object.values(STATES).sort(), [
+    'dispatching',
+    'exiting:done',
+    'exiting:errored',
+    'working',
+  ]);
+});
+
+test('no signals yet -> dispatching (container up, no [exec])', () => {
+  assert.equal(deriveState({}), 'dispatching');
+});
+
+test('undefined input -> dispatching (default)', () => {
+  assert.equal(deriveState(undefined), 'dispatching');
+});
+
+test('logState working -> working', () => {
+  assert.equal(deriveState({ logState: 'working' }), 'working');
+});
+
+test('hasExec true -> working', () => {
+  assert.equal(deriveState({ hasExec: true }), 'working');
+});
+
+test('a [STEP] label implies working even without an explicit logState', () => {
+  assert.equal(deriveState({ latestStep: '[STEP 2] doing x' }), 'working');
+});
+
+test('exit code 0 -> exiting:done', () => {
+  assert.equal(deriveState({ logState: 'working', exitCode: 0 }), 'exiting:done');
+});
+
+test('non-zero exit code -> exiting:errored (overrides working)', () => {
+  assert.equal(deriveState({ logState: 'working', exitCode: 2 }), 'exiting:errored');
+});
+
+test('logState done -> exiting:done', () => {
+  assert.equal(deriveState({ logState: 'done' }), 'exiting:done');
+});
+
+test('logState errored -> exiting:errored', () => {
+  assert.equal(deriveState({ logState: 'errored' }), 'exiting:errored');
+});
+
+test('exit code wins over a working step label', () => {
   assert.equal(
-    deriveState({ progressStatus: 'failed', logState: 'done' }),
-    'errored'
-  );
-});
-
-test('log working beats progress queued', () => {
-  assert.equal(
-    deriveState({ progressStatus: 'queued', logState: 'working' }),
-    'working'
-  );
-});
-
-test('log dispatching beats progress queued', () => {
-  assert.equal(
-    deriveState({ progressStatus: 'queued', logState: 'dispatching' }),
-    'dispatching'
-  );
-});
-
-test('progress blocked beats log working', () => {
-  assert.equal(
-    deriveState({ progressStatus: 'blocked', logState: 'working' }),
-    'blocked'
-  );
-});
-
-test('non-zero exit code yields errored even with no log state', () => {
-  assert.equal(deriveState({ logState: null, exitCode: 1 }), 'errored');
-});
-
-test('exit code 0 yields done', () => {
-  assert.equal(deriveState({ logState: null, exitCode: 0 }), 'done');
-});
-
-test('no signals at all -> queued (default)', () => {
-  assert.equal(deriveState({}), 'queued');
-});
-
-test('undefined input -> queued (default)', () => {
-  assert.equal(deriveState(undefined), 'queued');
-});
-
-test('progress queued, no log -> queued', () => {
-  assert.equal(deriveState({ progressStatus: 'queued', logState: null }), 'queued');
-});
-
-test('progress completed, no log -> done', () => {
-  assert.equal(deriveState({ progressStatus: 'completed', logState: null }), 'done');
-});
-
-test('log working overrides progress completed (stale progress)', () => {
-  assert.equal(
-    deriveState({ progressStatus: 'completed', logState: 'working' }),
-    'working'
-  );
-});
-
-test('log errored beats progress queued', () => {
-  assert.equal(
-    deriveState({ progressStatus: 'queued', logState: 'errored' }),
-    'errored'
+    deriveState({ logState: 'working', latestStep: '[STEP 9] x', exitCode: 1 }),
+    'exiting:errored'
   );
 });
