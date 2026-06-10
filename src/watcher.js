@@ -5,25 +5,33 @@ const path = require('path');
 const chokidar = require('chokidar');
 
 const { tailLog } = require('./parsers/logs');
+const { tailJournal } = require('./parsers/journal');
 
 const DEBOUNCE_MS = 120;
 
-// Logs-only watcher. Watches `.voltron/logs/*.log` under the project root and,
-// on each appended chunk, hands the parsed live-state payload to `onLogEvent`
-// (the CLI wires that to liveness.applyLogEvent). All routing for progress.json,
-// journal/, analyses/, and .beads/ is gone (docs/live-monitor-redesign.md §5.1,
-// watcher.js → gut). Offsets are tracked so only new bytes are parsed; historical
-// log content is skipped at startup (present-tense rule, §2.5).
-function createWatcher(projectRoot, onLogEvent) {
+// Logs + journal watcher. Watches `.voltron/logs/*.log` and `.voltron/journal/*.md`
+// under the project root. On each appended log chunk it hands the parsed live-state
+// payload to `onLogEvent`; on each appended journal chunk it hands the latest
+// JournalSignal to `onJournalEvent` (the CLI wires these to liveness). Offsets are
+// tracked so only new bytes are parsed; historical content is skipped at startup
+// (present-tense rule, §2.5). Native fs events are unreliable on WSL2/Windows bind
+// mounts, so pollTail() re-tails BOTH logs and the journal on the poll cadence as the
+// authoritative belt-and-suspenders. Read-only: only reads/stats/tails — never writes.
+function createWatcher(projectRoot, onLogEvent, onJournalEvent) {
   if (!projectRoot || typeof projectRoot !== 'string') {
     throw new Error('createWatcher: projectRoot (string) is required');
   }
   if (typeof onLogEvent !== 'function') {
     throw new Error('createWatcher: onLogEvent callback is required');
   }
+  // onJournalEvent is optional — the hub-liveness branch is additive. A no-op default
+  // keeps existing two-arg callers (and tests) working unchanged.
+  const emitJournal = typeof onJournalEvent === 'function' ? onJournalEvent : function () {};
 
   const logsDir = path.join(projectRoot, '.voltron', 'logs');
+  const journalDir = path.join(projectRoot, '.voltron', 'journal');
   const logOffsets = new Map();
+  const journalOffsets = new Map();
   const timers = new Map();
 
   function debounce(key, ms, fn) {
@@ -48,6 +56,13 @@ function createWatcher(projectRoot, onLogEvent) {
     if (event) onLogEvent(event);
   }
 
+  function handleJournal(file) {
+    const from = journalOffsets.get(file) || 0;
+    const { signal, newOffset } = tailJournal(file, from);
+    journalOffsets.set(file, newOffset);
+    if (signal) emitJournal(signal);
+  }
+
   function route(file) {
     const resolved = path.resolve(file);
     const dir = path.dirname(resolved);
@@ -56,34 +71,44 @@ function createWatcher(projectRoot, onLogEvent) {
       debounce(resolved, DEBOUNCE_MS, function () {
         handleLog(resolved);
       });
+    } else if (dir === path.resolve(journalDir) && ext === '.md') {
+      debounce(resolved, DEBOUNCE_MS, function () {
+        handleJournal(resolved);
+      });
     }
   }
 
-  // Seed offsets to current size so the first post-startup append is tailed
-  // from end-of-file — historical log content is not replayed.
-  function scanExisting() {
+  // Seed offsets to current size so the first post-startup append is tailed from
+  // end-of-file — historical log/journal content is not replayed (present-tense rule).
+  function seedDir(dir, ext, offsets) {
     let entries;
     try {
-      entries = fs.readdirSync(logsDir);
+      entries = fs.readdirSync(dir);
     } catch (_e) {
-      return; // logs dir may not exist yet — tolerate it
+      return; // dir may not exist yet — tolerate it
     }
     for (const name of entries) {
-      if (path.extname(name).toLowerCase() !== '.log') continue;
-      const resolved = path.resolve(path.join(logsDir, name));
+      if (path.extname(name).toLowerCase() !== ext) continue;
+      const resolved = path.resolve(path.join(dir, name));
       try {
-        logOffsets.set(resolved, fs.statSync(resolved).size);
+        offsets.set(resolved, fs.statSync(resolved).size);
       } catch (_e) {
         /* ignore unreadable entries */
       }
     }
   }
 
+  function scanExisting() {
+    seedDir(logsDir, '.log', logOffsets);
+    seedDir(journalDir, '.md', journalOffsets);
+  }
+
   // `usePolling` (not native fs events) + no `awaitWriteFinish`: container-written
-  // logs on WSL2/Windows bind mounts coalesce/miss native events, and
-  // awaitWriteFinish defers a continuously-growing log until writes settle. Polling
-  // surfaces appends promptly; pollTail() below is the authoritative belt-and-suspenders.
-  const watcher = chokidar.watch(logsDir, {
+  // logs and host-written journal entries on WSL2/Windows bind mounts coalesce/miss
+  // native events, and awaitWriteFinish defers a continuously-growing file until writes
+  // settle. Polling surfaces appends promptly; pollTail() below is the authoritative
+  // belt-and-suspenders.
+  const watcher = chokidar.watch([logsDir, journalDir], {
     ignoreInitial: true,
     persistent: true,
     usePolling: true,
@@ -96,28 +121,33 @@ function createWatcher(projectRoot, onLogEvent) {
     /* tolerate watch errors (missing dir, EPERM on Windows) */
   });
 
-  // Poll-driven tail: independent of native fs events. Walks the logs dir, picks up
-  // any *.log that appeared after startup (untracked files default to offset 0, so
-  // their [entry]/[exec] are read), and for every tracked log whose size grew reads
-  // ONLY the appended bytes via handleLog (offset-tracked + idempotent). Reading past
-  // EOF is a no-op, so calling this alongside chokidar is safe. The CLI invokes it on
-  // the Docker poll cadence so liveness no longer depends on fs-watch events firing.
-  function pollTail() {
+  // Poll-driven tail: independent of native fs events. Walks the logs and journal dirs,
+  // picks up any *.log/*.md that appeared after startup (untracked files default to
+  // offset 0, so their first content is read), and for every tracked file whose size
+  // grew reads ONLY the appended bytes (offset-tracked + idempotent). Reading past EOF is
+  // a no-op, so calling this alongside chokidar is safe. The CLI invokes it on the Docker
+  // poll cadence so both container liveness and hub liveness advance on that cadence.
+  function pollDir(dir, ext, handle) {
     let entries;
     try {
-      entries = fs.readdirSync(logsDir);
+      entries = fs.readdirSync(dir);
     } catch (_e) {
-      return; // logs dir may not exist yet — tolerate it
+      return; // dir may not exist yet — tolerate it
     }
     for (const name of entries) {
-      if (path.extname(name).toLowerCase() !== '.log') continue;
-      const resolved = path.resolve(path.join(logsDir, name));
+      if (path.extname(name).toLowerCase() !== ext) continue;
+      const resolved = path.resolve(path.join(dir, name));
       try {
-        handleLog(resolved);
+        handle(resolved);
       } catch (_e) {
         /* swallow per-file read/parse errors — observer must never crash */
       }
     }
+  }
+
+  function pollTail() {
+    pollDir(logsDir, '.log', handleLog);
+    pollDir(journalDir, '.md', handleJournal);
   }
 
   function close() {

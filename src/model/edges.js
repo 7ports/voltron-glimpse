@@ -8,8 +8,10 @@
 const HUB_ID = 'scrum-master';
 
 // Accepts a Map (nodeId -> entry), an array of nodeIds/entries, or a plain
-// object keyed by nodeId. Returns [] when the live set is empty — the hub only
-// exists while >= 1 agent is live (synthetic hub presence rule, §3.2).
+// object keyed by nodeId. Returns [] when the live set is empty: spokes hang
+// ONLY off live agents. Hub PRESENCE is a separate decision owned by the
+// reconciler (journal-active OR >= 1 live agent, §3.2) — a lone hub with no
+// spokes is valid, so an empty spoke set does not imply the hub is absent.
 function nodeIdsOf(liveAgents) {
   const ids = [];
   if (!liveAgents) return ids;

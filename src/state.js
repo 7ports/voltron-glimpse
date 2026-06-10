@@ -9,6 +9,7 @@ class StateModel {
     this.liveAgents = {}; // nodeId -> live agent entry
     this.edges = [];
     this.dockerAvailable = false;
+    this.hub = null; // single synthetic scrum-master hub, or null when absent
   }
 
   snapshot() {
@@ -16,6 +17,7 @@ class StateModel {
       liveAgents: JSON.parse(JSON.stringify(this.liveAgents)),
       edges: this.edges.map((e) => ({ ...e })),
       dockerAvailable: this.dockerAvailable,
+      hub: this.hub ? { ...this.hub } : null,
     };
   }
 
@@ -46,6 +48,27 @@ class StateModel {
         const nodeId = payload.nodeId;
         delete this.liveAgents[nodeId];
         return { type: 'exit', nodeId };
+      }
+      case EVENTS.HUB_UPDATE: {
+        if (!payload || !payload.id) return null;
+        // Removal: present:false (or removed:true) nulls the hub.
+        if (payload.present === false || payload.removed === true) {
+          this.hub = null;
+          return { type: 'hub', hub: null };
+        }
+        // Keep only hub display fields; mutate in place when the hub already
+        // exists so nothing accumulates (an idle update == same object).
+        const next = {};
+        for (const k of Object.keys(payload)) {
+          if (k === 'present' || k === 'removed' || k === 'dockerAvailable') continue;
+          next[k] = payload[k];
+        }
+        if (this.hub) {
+          Object.assign(this.hub, next);
+        } else {
+          this.hub = next;
+        }
+        return { type: 'hub', hub: { ...this.hub } };
       }
       case EVENTS.EDGE_UPDATE: {
         if (!payload) return null;

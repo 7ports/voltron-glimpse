@@ -56,3 +56,47 @@ test('pollTail: tolerates a missing logs dir without throwing', () => {
   assert.strictEqual(events.length, 0);
   return w.close();
 });
+
+test('pollTail: journal — seeded offset skips history; one append => one onJournalEvent', async () => {
+  const root = mkTmpRoot();
+  const journalDir = path.join(root, '.voltron', 'journal');
+  fs.mkdirSync(journalDir, { recursive: true });
+  const journalFile = path.join(journalDir, '2026-06-10.md');
+
+  // Pre-existing history written BEFORE startup must not be replayed.
+  fs.writeFileSync(
+    journalFile,
+    '**09:00** 🚀 `scrum-master` [session_start] booted\n' +
+      '**09:01** 📝 `scrum-master` [note] reading backlog\n'
+  );
+
+  const logEvents = [];
+  const journalSignals = [];
+  const w = createWatcher(
+    root,
+    (e) => logEvents.push(e),
+    (s) => journalSignals.push(s)
+  );
+
+  // Seed offsets to current size (present-tense rule) — history is skipped.
+  w.scanExisting();
+  w.pollTail();
+  assert.strictEqual(journalSignals.length, 0, 'seeded history is not replayed');
+
+  // Append exactly one new entry.
+  fs.appendFileSync(
+    journalFile,
+    '**09:05** → `scrum-master` [dispatch] Dispatched fullstack-dev (B2)\n'
+  );
+  w.pollTail();
+  assert.strictEqual(journalSignals.length, 1, 'one append => exactly one journal event');
+  assert.strictEqual(journalSignals[0].kind, 'dispatch');
+  assert.strictEqual(journalSignals[0].text, 'Dispatched fullstack-dev (B2)');
+  assert.strictEqual(journalSignals[0].agent, 'scrum-master');
+
+  // Idempotent: no growth => no further events.
+  w.pollTail();
+  assert.strictEqual(journalSignals.length, 1, 'no growth means no re-processing');
+
+  await w.close();
+});

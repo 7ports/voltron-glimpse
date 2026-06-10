@@ -104,3 +104,74 @@ test('applyEvent returns null for an unknown event name', () => {
   const s = new StateModel();
   assert.strictEqual(s.applyEvent('not:a:real:event', { nodeId: 'x' }), null);
 });
+
+// --- Scrum-master hub field (B4) ------------------------------------------
+test('HUB_UPDATE creates the hub and snapshot() returns it', () => {
+  const s = new StateModel();
+  const patch = s.applyEvent(EVENTS.HUB_UPDATE, {
+    id: 'scrum-master',
+    present: true,
+    state: 'active',
+    label: 'Decomposing backlog',
+    kind: 'note',
+    emoji: '\u{1F4DD}',
+    time: '10:00',
+  });
+  assert.ok(patch);
+  assert.strictEqual(patch.type, 'hub');
+  const snap = s.snapshot();
+  assert.ok(snap.hub);
+  assert.strictEqual(snap.hub.id, 'scrum-master');
+  assert.strictEqual(snap.hub.state, 'active');
+  assert.strictEqual(snap.hub.label, 'Decomposing backlog');
+});
+
+test('an idle HUB_UPDATE mutates the hub in place (no accumulation)', () => {
+  const s = new StateModel();
+  s.applyEvent(EVENTS.HUB_UPDATE, {
+    id: 'scrum-master',
+    present: true,
+    state: 'active',
+    label: 'working',
+    kind: 'note',
+  });
+  const before = s.hub;
+  s.applyEvent(EVENTS.HUB_UPDATE, {
+    id: 'scrum-master',
+    present: true,
+    state: 'idle',
+    label: 'working',
+    kind: 'note',
+  });
+  assert.strictEqual(s.hub, before, 'same object reference — mutated in place');
+  assert.strictEqual(s.hub.state, 'idle');
+  assert.strictEqual(s.snapshot().hub.state, 'idle');
+});
+
+test('HUB_UPDATE with present:false removes the hub (nulls it)', () => {
+  const s = new StateModel();
+  s.applyEvent(EVENTS.HUB_UPDATE, {
+    id: 'scrum-master',
+    present: true,
+    state: 'active',
+    label: 'x',
+  });
+  assert.ok(s.snapshot().hub);
+  const patch = s.applyEvent(EVENTS.HUB_UPDATE, { id: 'scrum-master', present: false });
+  assert.strictEqual(patch.type, 'hub');
+  assert.strictEqual(patch.hub, null);
+  assert.strictEqual(s.snapshot().hub, null);
+});
+
+test('snapshot hub is an independent copy (mutating snapshot does not affect state)', () => {
+  const s = new StateModel();
+  s.applyEvent(EVENTS.HUB_UPDATE, {
+    id: 'scrum-master',
+    present: true,
+    state: 'active',
+    label: 'x',
+  });
+  const snap = s.snapshot();
+  snap.hub.label = 'mutated';
+  assert.strictEqual(s.hub.label, 'x');
+});

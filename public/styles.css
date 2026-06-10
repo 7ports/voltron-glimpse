@@ -104,6 +104,12 @@ html, body {
   50%       { box-shadow: 0 0 0 5px rgba(244, 67, 54, 0.0); }
 }
 
+/* Hub-active swatch: slow cyan halo mirrors the hub's breathing pulse */
+@keyframes hub-halo {
+  0%, 100% { box-shadow: 0 0 0 0   rgba(0, 229, 255, 0.7); }
+  50%       { box-shadow: 0 0 0 6px rgba(0, 229, 255, 0.0); }
+}
+
 /* =============================================================
    Full-bleed graph stage — dark "live instrument" canvas
    ============================================================= */
@@ -300,6 +306,10 @@ html, body {
 .legend-swatch.status-exiting-errored {
   background: var(--color-exiting-errored);
   animation: swatch-flash-err 2s ease-in-out infinite;
+}
+.legend-swatch.hub-active {
+  background: var(--color-accent);
+  animation: hub-halo 2.2s ease-in-out infinite;
 }
 
 /* Tier node swatches */

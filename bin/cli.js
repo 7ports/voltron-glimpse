@@ -17,6 +17,7 @@ const { parseLog } = require('../src/parsers/logs');
 
 const DEFAULT_PORT = 7424;
 const DEFAULT_POLL_MS = 1000;
+const DEFAULT_HUB_FRESHNESS_MS = 60000;
 const HOST = '127.0.0.1';
 const PUBLIC_DIR = path.join(__dirname, '..', 'public');
 const MAX_PORT_TRIES = 50;
@@ -40,6 +41,7 @@ function printHelp() {
       '  --docker      Use Docker introspection for liveness (default: on)',
       '  --no-docker   Skip Docker; infer liveness from log freshness (degraded)',
       '  --poll <ms>   Docker/log poll cadence in ms (default 1000)',
+      '  --hub-freshness <ms>  Journal idle window for the scrum-master hub (default 60000)',
       '  --verbose     Verbose logging',
       '  -h, --help    Show this help',
       '',
@@ -54,6 +56,7 @@ function parseArgs(argv) {
     root: null,
     docker: true, // Docker is the default, primary liveness path now.
     poll: DEFAULT_POLL_MS,
+    hubFreshness: DEFAULT_HUB_FRESHNESS_MS,
     verbose: false,
   };
   for (let i = 0; i < argv.length; i++) {
@@ -90,6 +93,15 @@ function parseArgs(argv) {
           fail(`invalid --poll value: ${v}`);
         }
         opts.poll = n;
+        break;
+      }
+      case '--hub-freshness': {
+        const v = argv[++i];
+        const n = Number.parseInt(v, 10);
+        if (!Number.isInteger(n) || n < 1) {
+          fail(`invalid --hub-freshness value: ${v}`);
+        }
+        opts.hubFreshness = n;
         break;
       }
       case '--verbose':
@@ -205,7 +217,7 @@ async function main() {
     });
   }
 
-  const reconciler = createReconciler({ bus });
+  const reconciler = createReconciler({ bus, hubFreshnessMs: opts.hubFreshness });
 
   const httpServer = createHttpServer(PUBLIC_DIR);
   const wsServer = createWsServer(httpServer, state, bus);
@@ -217,10 +229,19 @@ async function main() {
     fail(`failed to bind HTTP server: ${err && err.message ? err.message : err}`);
   }
 
-  // Logs watcher (both modes): enrich live nodes with [exec]/[STEP]/[exit].
-  const watcher = createWatcher(projectRoot, function (parsed) {
-    reconciler.applyLogEvent(parsed);
-  });
+  // Logs + journal watcher (both modes): logs enrich live nodes with
+  // [exec]/[STEP]/[exit]; the journal drives scrum-master hub liveness. The
+  // watcher globs `.voltron/journal/*.md`, so a UTC-midnight day-file rollover is
+  // picked up automatically (a new day's first append is handled like any other).
+  const watcher = createWatcher(
+    projectRoot,
+    function (parsed) {
+      reconciler.applyLogEvent(parsed);
+    },
+    function (signal) {
+      reconciler.applyJournalEvent(signal);
+    }
+  );
   watcher.scanExisting();
 
   let pollTimer = null;
@@ -242,7 +263,7 @@ async function main() {
         lastAvailable = result.available;
         const snap = reconciler.snapshot();
         bus.emit(EVENTS.EDGE_UPDATE, {
-          hub: snap.edges.length > 0 ? HUB_ID : null,
+          hub: snap.hub ? HUB_ID : null,
           edges: snap.edges,
           dockerAvailable: snap.dockerAvailable,
         });
@@ -251,9 +272,12 @@ async function main() {
     pollOnce();
     pollTimer = setInterval(pollOnce, opts.poll);
   } else {
-    // Degraded: infer membership from log freshness on the same cadence.
+    // Degraded: infer membership from log freshness on the same cadence. Also
+    // re-tail the journal so the scrum-master hub stays live without Docker (the
+    // idle-tick that flips the hub to idle is armed inside the reconciler).
     const freshOnce = function () {
       reconciler.applyLogFreshness(scanLogsForFreshness(logsDir));
+      watcher.pollTail();
     };
     freshOnce();
     pollTimer = setInterval(freshOnce, opts.poll);

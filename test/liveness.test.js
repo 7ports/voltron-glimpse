@@ -40,6 +40,7 @@ function collect(bus) {
   bus.on(EVENTS.AGENT_UPDATE, (p) => events.push({ type: 'update', p }));
   bus.on(EVENTS.AGENT_EXIT, (p) => events.push({ type: 'exit', p }));
   bus.on(EVENTS.EDGE_UPDATE, (p) => events.push({ type: 'edge', p }));
+  bus.on(EVENTS.HUB_UPDATE, (p) => events.push({ type: 'hub', p }));
   return events;
 }
 
@@ -193,4 +194,167 @@ test('a single available:false poll is treated as no-change (live set not torn d
 
   timer.advance(10000);
   assert.strictEqual(r.getLiveSet().liveAgents.length, 2);
+});
+
+// --- Scrum-master hub liveness (B3) ---------------------------------------
+const HUB = 'scrum-master';
+function makeJournal(over) {
+  return Object.assign(
+    {
+      time: '10:00',
+      date: '2026-06-09',
+      kind: 'dispatch',
+      agent: 'scrum-master',
+      text: 'Dispatched fullstack-dev',
+      emoji: '→',
+    },
+    over || {}
+  );
+}
+
+test('applyJournalEvent sets the hub active and emits HUB_UPDATE(active)', () => {
+  const timer = makeFakeTimer();
+  const bus = createEventBus();
+  const ev = collect(bus);
+  const r = createReconciler({ bus, timer, hubFreshnessMs: 60000 });
+
+  r.applyJournalEvent(makeJournal({ text: 'Decomposing backlog', kind: 'note' }));
+
+  const hubEvents = ev.filter((e) => e.type === 'hub');
+  assert.ok(hubEvents.length >= 1);
+  const last = hubEvents[hubEvents.length - 1].p;
+  assert.strictEqual(last.id, HUB);
+  assert.strictEqual(last.state, 'active');
+  assert.strictEqual(last.label, 'Decomposing backlog');
+  assert.strictEqual(last.kind, 'note');
+
+  const snap = r.snapshot();
+  assert.ok(snap.hub);
+  assert.strictEqual(snap.hub.state, 'active');
+  assert.strictEqual(snap.hub.label, 'Decomposing backlog');
+});
+
+test('hub is present with ZERO agents while journal-active (hub alone, no spokes)', () => {
+  const timer = makeFakeTimer();
+  const bus = createEventBus();
+  const ev = collect(bus);
+  const r = createReconciler({ bus, timer, hubFreshnessMs: 60000 });
+
+  r.applyJournalEvent(makeJournal());
+
+  const snap = r.snapshot();
+  assert.ok(snap.hub, 'hub present with zero agents while active');
+  assert.strictEqual(snap.liveAgents.length, 0);
+  assert.strictEqual(snap.edges.length, 0);
+
+  const edgeEvents = ev.filter((e) => e.type === 'edge');
+  const lastEdge = edgeEvents[edgeEvents.length - 1].p;
+  assert.strictEqual(lastEdge.hub, HUB);
+  assert.strictEqual(lastEdge.edges.length, 0);
+});
+
+test('hub flips active -> idle after hubFreshnessMs and is removed when idle AND empty', () => {
+  const timer = makeFakeTimer();
+  const bus = createEventBus();
+  const ev = collect(bus);
+  const r = createReconciler({ bus, timer, hubFreshnessMs: 60000 });
+
+  r.applyJournalEvent(makeJournal());
+  assert.strictEqual(r.snapshot().hub.state, 'active');
+  ev.length = 0;
+
+  timer.advance(60001);
+
+  const hubEvents = ev.filter((e) => e.type === 'hub');
+  assert.ok(hubEvents.length >= 1);
+  const last = hubEvents[hubEvents.length - 1].p;
+  assert.strictEqual(last.id, HUB);
+  assert.strictEqual(last.present, false);
+  assert.strictEqual(r.snapshot().hub, null);
+});
+
+test('a live agent keeps the hub present after the journal goes stale (dims to idle)', () => {
+  const timer = makeFakeTimer();
+  const bus = createEventBus();
+  const ev = collect(bus);
+  const r = createReconciler({ bus, timer, hubFreshnessMs: 60000 });
+
+  r.applyDockerPoll({ available: true, containers: [A] });
+  r.applyJournalEvent(makeJournal());
+  assert.strictEqual(r.snapshot().hub.state, 'active');
+  ev.length = 0;
+
+  timer.advance(60001);
+
+  const snap = r.snapshot();
+  assert.ok(snap.hub, 'hub stays present while an agent is live');
+  assert.strictEqual(snap.hub.state, 'idle');
+
+  const hubEvents = ev.filter((e) => e.type === 'hub');
+  const last = hubEvents[hubEvents.length - 1].p;
+  assert.strictEqual(last.state, 'idle');
+  assert.strictEqual(last.present, true);
+});
+
+// --- Dispatch-spoke correlation flash (B7, §3.5) --------------------------
+
+test('dispatch journal naming A + a container A entering within the window flashes A\'s spoke', () => {
+  const timer = makeFakeTimer();
+  const bus = createEventBus();
+  const ev = collect(bus);
+  const r = createReconciler({ bus, timer, dispatchWindowMs: 10000 });
+
+  r.applyJournalEvent(makeJournal({ kind: 'dispatch', text: 'Dispatched A (B1) to do work' }));
+  timer.advance(3000); // still inside the 10 s correlation window
+  r.applyDockerPoll({ available: true, containers: [A] });
+
+  const enterA = ev.filter((e) => e.type === 'enter' && e.p.nodeId === 'A');
+  assert.strictEqual(enterA.length, 1);
+  assert.strictEqual(enterA[0].p.dispatchFlash, true);
+});
+
+test('a container entering AFTER the correlation window does NOT flash', () => {
+  const timer = makeFakeTimer();
+  const bus = createEventBus();
+  const ev = collect(bus);
+  const r = createReconciler({ bus, timer, dispatchWindowMs: 10000 });
+
+  r.applyJournalEvent(makeJournal({ kind: 'dispatch', text: 'Dispatched A (B1) to do work' }));
+  timer.advance(10001); // past the window -> pending dispatch expires
+  r.applyDockerPoll({ available: true, containers: [A] });
+
+  const enterA = ev.filter((e) => e.type === 'enter' && e.p.nodeId === 'A');
+  assert.strictEqual(enterA.length, 1);
+  assert.ok(!enterA[0].p.dispatchFlash, 'no flash once the window has lapsed');
+});
+
+test('a container entering with no preceding dispatch enters normally with no flash', () => {
+  const timer = makeFakeTimer();
+  const bus = createEventBus();
+  const ev = collect(bus);
+  const r = createReconciler({ bus, timer, dispatchWindowMs: 10000 });
+
+  r.applyDockerPoll({ available: true, containers: [A] });
+
+  const enterA = ev.filter((e) => e.type === 'enter' && e.p.nodeId === 'A');
+  assert.strictEqual(enterA.length, 1);
+  assert.strictEqual(enterA[0].p.state, 'dispatching');
+  assert.ok(!enterA[0].p.dispatchFlash, 'normal enter carries no flash hint');
+});
+
+test('hub vanishes when the last live agent exits while the journal is already idle', () => {
+  const timer = makeFakeTimer();
+  const bus = createEventBus();
+  const r = createReconciler({ bus, timer, lingerMs: 2500, hubFreshnessMs: 60000 });
+
+  r.applyDockerPoll({ available: true, containers: [A] });
+  r.applyJournalEvent(makeJournal());
+  timer.advance(60001); // journal idle, agent A still live -> hub idle but present
+  assert.strictEqual(r.snapshot().hub.state, 'idle');
+
+  r.applyDockerPoll({ available: true, containers: [] }); // A leaves docker
+  timer.advance(2600); // linger elapses -> A exits
+
+  assert.strictEqual(r.snapshot().liveAgents.length, 0);
+  assert.strictEqual(r.snapshot().hub, null);
 });

@@ -3,6 +3,31 @@ const { buildLiveEdges, HUB_ID } = require('./model/edges');
 
 const STEP_RE = /^\[(STEP|DONE)\b/;
 
+// §3.5 dispatch correlation: scan a `dispatch` journal line's free text for the
+// DISPATCHED agent slug (the actor is always scrum-master; the target is named
+// in the prose, e.g. "Dispatched `fullstack-dev` (B1) to …"). Best-effort: a
+// missed parse simply means no flash, never a wrong edge.
+const DISPATCH_RE = /dispatch(?:ed|ing)?\s+`?([A-Za-z][\w-]*)/i;
+
+function normalizeAgent(name) {
+  return typeof name === 'string' ? name.trim().toLowerCase() : '';
+}
+
+// Pull the dispatched agent slug out of a JournalSignal. Prefers an explicit
+// `dispatchTarget` (set by the parser when confident), else heuristically scans
+// the text. Returns a lowercased slug or null when nothing is recognizable.
+function extractDispatchTarget(signal) {
+  if (!signal) return null;
+  if (typeof signal.dispatchTarget === 'string' && signal.dispatchTarget.trim()) {
+    return signal.dispatchTarget.trim().toLowerCase();
+  }
+  if (typeof signal.text === 'string') {
+    const m = DISPATCH_RE.exec(signal.text);
+    if (m && m[1]) return m[1].toLowerCase();
+  }
+  return null;
+}
+
 function defaultTimer() {
   return {
     setTimeout: (fn, ms) => setTimeout(fn, ms),
@@ -22,6 +47,8 @@ function createReconciler({
   lingerMs = 2500,
   erroredLingerMs = 4000,
   freshnessMs = 15000,
+  hubFreshnessMs = 60000,
+  dispatchWindowMs = 10000,
   timer,
 } = {}) {
   if (!bus || typeof bus.emit !== 'function') {
@@ -33,6 +60,54 @@ function createReconciler({
   const liveAgents = new Map();
   let dockerAvailable = false;
   let edges = [];
+
+  // --- Orchestrator hub liveness (journal-inferred) ----------------------
+  // The synthetic scrum-master hub is NOT a container; its only states are
+  // 'active' (journaled within hubFreshnessMs) and 'idle' (gone quiet). It is
+  // PRESENT iff journal-active OR >= 1 live agent (§3.2); when idle AND empty it
+  // is removed. Label/kind/emoji/time come from the latest journal entry.
+  let hubState = 'idle';
+  let hubLabel = null;
+  let hubKind = null;
+  let hubEmoji = null;
+  let hubTime = null;
+  let lastJournalTs = null;
+  let hubIdleTimer = null;
+  let lastHubPresent = false;
+
+  // --- Dispatch correlation (§3.5, best-effort) --------------------------
+  // A short list of recently-journaled dispatches { agent, ts }. When a matching
+  // container ENTERS within dispatchWindowMs we flash its hub→agent spoke once.
+  // Pending entries expire silently; this never gates the normal enter flow.
+  let pendingDispatches = [];
+
+  function prunePending(now) {
+    if (pendingDispatches.length === 0) return;
+    pendingDispatches = pendingDispatches.filter((pd) => now - pd.ts <= dispatchWindowMs);
+  }
+
+  function containerMatches(pdAgent, container) {
+    return (
+      pdAgent === normalizeAgent(container.agent) ||
+      pdAgent === normalizeAgent(container.nodeId)
+    );
+  }
+
+  function isHubPresent() {
+    return hubState === 'active' || liveAgents.size > 0;
+  }
+
+  function hubSnapshot() {
+    if (!isHubPresent()) return null;
+    return {
+      id: HUB_ID,
+      state: hubState,
+      label: hubLabel,
+      kind: hubKind,
+      emoji: hubEmoji,
+      time: hubTime,
+    };
+  }
 
   function publicEntry(e) {
     return {
@@ -51,13 +126,23 @@ function createReconciler({
   }
 
   function recomputeEdges() {
-    // Edge construction lives in one place (src/model/edges.js).
+    // Edge construction lives in one place (src/model/edges.js). Spokes only
+    // hang off LIVE agents, so the edge array is empty with zero agents — but
+    // the hub itself can still be PRESENT (journal-active, §3.2): a lone hub
+    // with no spokes is valid.
     edges = buildLiveEdges(liveAgents);
+    const present = isHubPresent();
     bus.emit(EVENTS.EDGE_UPDATE, {
-      hub: liveAgents.size > 0 ? HUB_ID : null,
+      hub: present ? HUB_ID : null,
       edges: edges.slice(),
       dockerAvailable,
     });
+    // The hub can vanish purely from an agent exit (last agent gone while the
+    // journal is already idle); null it on consumers when presence drops.
+    if (lastHubPresent && !present) {
+      bus.emit(EVENTS.HUB_UPDATE, { id: HUB_ID, present: false });
+    }
+    lastHubPresent = present;
   }
 
   // Idempotent wind-down: schedule removal once. exitCode === null means the
@@ -97,6 +182,7 @@ function createReconciler({
     const list = Array.isArray(containers) ? containers : [];
     const seen = new Set();
     let membershipChanged = false;
+    prunePending(clock.now());
 
     for (const c of list) {
       if (!c || !c.nodeId) continue;
@@ -115,13 +201,21 @@ function createReconciler({
           exitCode: null,
         });
         membershipChanged = true;
-        bus.emit(EVENTS.AGENT_ENTER, {
+        const enterPayload = {
           nodeId,
           agent: c.agent,
           containerName: c.name,
           createdAt: c.createdAt,
           state: 'dispatching',
-        });
+        };
+        // §3.5: correlate a recent dispatch to this fresh container; flash once
+        // and consume the pending entry so it can never flash twice.
+        const matchIdx = pendingDispatches.findIndex((pd) => containerMatches(pd.agent, c));
+        if (matchIdx !== -1) {
+          pendingDispatches.splice(matchIdx, 1);
+          enterPayload.dispatchFlash = true;
+        }
+        bus.emit(EVENTS.AGENT_ENTER, enterPayload);
       }
     }
 
@@ -227,11 +321,73 @@ function createReconciler({
     if (membershipChanged) recomputeEdges();
   }
 
+  function flipHubIdle() {
+    hubIdleTimer = null;
+    if (hubState !== 'active') return;
+    hubState = 'idle';
+    if (liveAgents.size > 0) {
+      // Agents still live: dim the hub in place, keep it present.
+      bus.emit(EVENTS.HUB_UPDATE, {
+        id: HUB_ID,
+        present: true,
+        state: 'idle',
+        label: hubLabel,
+        kind: hubKind,
+        emoji: hubEmoji,
+        time: hubTime,
+      });
+      lastHubPresent = true;
+    } else {
+      // Idle AND empty: remove the hub (present-tense / ephemeral rule).
+      bus.emit(EVENTS.HUB_UPDATE, { id: HUB_ID, present: false });
+      lastHubPresent = false;
+      recomputeEdges();
+    }
+  }
+
+  // Journal-inferred hub liveness. Each parsed JournalSignal marks the
+  // orchestrator active, refreshes the "doing now" label, and (re)arms the
+  // idle-tick that flips active -> idle once hubFreshnessMs lapses with no new
+  // append. Read-only: the signal comes from tailing the journal, never writing.
+  function applyJournalEvent(signal) {
+    if (!signal) return;
+    const wasPresent = isHubPresent();
+    lastJournalTs = clock.now();
+    // §3.5: a dispatch line primes a pending correlation; a matching container
+    // entering within dispatchWindowMs will flash its spoke.
+    if (signal.kind === 'dispatch') {
+      prunePending(lastJournalTs);
+      const target = extractDispatchTarget(signal);
+      if (target) pendingDispatches.push({ agent: target, ts: lastJournalTs });
+    }
+    hubState = 'active';
+    if (signal.text != null) hubLabel = signal.text;
+    if (signal.kind != null) hubKind = signal.kind;
+    if (signal.emoji != null) hubEmoji = signal.emoji;
+    if (signal.time != null) hubTime = signal.time;
+    bus.emit(EVENTS.HUB_UPDATE, {
+      id: HUB_ID,
+      present: true,
+      state: 'active',
+      label: hubLabel,
+      kind: hubKind,
+      emoji: hubEmoji,
+      time: hubTime,
+    });
+    if (hubIdleTimer) clock.clearTimeout(hubIdleTimer);
+    hubIdleTimer = clock.setTimeout(flipHubIdle, hubFreshnessMs);
+    // If the hub was absent (idle + empty) it has just appeared with zero
+    // agents: refresh edges so the EDGE_UPDATE hub field flips to HUB_ID.
+    if (!wasPresent) recomputeEdges();
+    else lastHubPresent = true;
+  }
+
   function snapshot() {
     return {
       liveAgents: liveSetArray(),
       edges: edges.slice(),
       dockerAvailable,
+      hub: hubSnapshot(),
     };
   }
 
@@ -239,6 +395,7 @@ function createReconciler({
     applyDockerPoll,
     applyLogEvent,
     applyLogFreshness,
+    applyJournalEvent,
     getLiveSet: snapshot,
     snapshot,
   };

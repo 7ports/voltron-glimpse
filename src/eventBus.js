@@ -5,6 +5,7 @@ const EVENTS = Object.freeze({
   AGENT_UPDATE: 'agent:update',
   AGENT_EXIT: 'agent:exit',
   EDGE_UPDATE: 'edge:update',
+  HUB_UPDATE: 'hub:update',
 });
 
 function createEventBus() {

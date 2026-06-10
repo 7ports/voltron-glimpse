@@ -65,6 +65,31 @@ window.GLIMPSE_CYTO_STYLE = [
     }
   },
 
+  /* ─── Hub active: rAF drives border-width + overlay-opacity (§3.4) ─── */
+  {
+    selector: 'node.hub.hub-active',
+    style: {
+      'background-color':  _C.hub,
+      'border-color':      'rgba(0,229,255,0.85)',
+      'border-width':      4,
+      'opacity':           1,
+      'overlay-color':     _C.hub,
+      'z-index':           20,
+    }
+  },
+
+  /* ─── Hub idle: dimmed, pulse stopped ───────────────────────────────── */
+  {
+    selector: 'node.hub.hub-idle',
+    style: {
+      'background-color':  'rgba(0,229,255,0.25)',
+      'border-color':      'rgba(0,229,255,0.22)',
+      'border-width':      2,
+      'opacity':           0.40,
+      'overlay-opacity':   0,
+    }
+  },
+
   /* ─── Tier sizing ─────────────────────────────────────────────────────
    *   Tier 1 — orchestrators (scrum-master, code-analyst …)
    *   Tier 2 — specialists (fullstack-dev, ui-designer …)
@@ -179,6 +204,23 @@ window.GLIMPSE_CYTO_STYLE = [
       'target-arrow-color': _C.working,
       'opacity':            0.85,
       'width':              2,
+    }
+  },
+
+  /* Dispatch launch flash (§3.5): one-shot bright cyan burst when the hub just
+     launched this agent. app.js animates line-color/width/opacity/dash inline
+     over ~1 s; this class supplies the glow halo + raised z-index for the burst,
+     then app.js removes it. */
+  {
+    selector: 'edge.dispatch.dispatch-flash',
+    style: {
+      'line-color':         _C.hub,
+      'target-arrow-color': _C.hub,
+      'width':              4,
+      'opacity':            1,
+      'overlay-color':      _C.hub,
+      'overlay-opacity':    0.20,
+      'z-index':            30,
     }
   },
 

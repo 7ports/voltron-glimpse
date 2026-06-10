@@ -58,6 +58,14 @@
   // Animation (§4)
   var PULSE_PERIOD_MS = 1400;     // §4.2: working-node breathing period
   var EDGE_FLOW_SPEED = 0.04;     // §4.3: dash-offset px per ms → ~40 px/s marching-ants
+  var HUB_PULSE_PERIOD_MS = 2200; // §3.4: hub active breathing — slower/distinct from working nodes
+
+  // §3.5 dispatch flash — one-shot bright burst along a hub→agent spoke when the
+  // orchestrator just launched that agent. Cyan to read as "the hub did this",
+  // distinct from the green working flow and the blue resting dispatch dash.
+  var DISPATCH_FLASH_MS = 1000;
+  var DISPATCH_FLASH_COLOR = '#00e5ff';
+  var DISPATCH_DASH_COLOR = '#2196f3';
 
   /* ──────────────────────────────────────────────────────────────────────
    * DOM lookups (null-safe)
@@ -85,6 +93,7 @@
   var liveAgents = {};   // nodeId -> live agent entry
   var edges = [];        // [{ id, source, target, kind, inferred }]
   var dockerAvailable;   // boolean | undefined (unknown until first message)
+  var hubState = null;   // hub payload from backend: { id, state:'active'|'idle', label, kind, … } or null
 
   var cy = null;
   var layoutTimer = null;
@@ -112,6 +121,15 @@
   function truncate(s, max) {
     if (typeof s !== 'string') return '';
     return s.length > max ? s.slice(0, max - 1) + '…' : s;
+  }
+
+  // Hub label: optional emoji prefix + truncated journal text; fallback to 'scrum-master'.
+  function hubLabel(hub) {
+    if (!hub) return HUB_ID;
+    var prefix = (typeof hub.emoji === 'string' && hub.emoji) ? hub.emoji + ' ' : '';
+    var text = (typeof hub.label === 'string' && hub.label) ? hub.label : '';
+    var full = (prefix + text).trim();
+    return full.length > 0 ? truncate(full, 60) : HUB_ID;
   }
 
   // Label: "<agent>\n<truncated [STEP]>" — or "<agent>\n<state>" when no step.
@@ -161,23 +179,24 @@
     startPulseLoop(); // §4.2/§4.3 — runs continuously once the graph is ready
   }
 
-  // The synthetic hub exists only while referenced as an edge source.
+  // The synthetic hub exists while edges reference it OR while the orchestrator is
+  // journal-active (hubState non-null). Label derives from hubState when present.
   function ensureHubNode() {
     if (!cy) return;
     if (cy.getElementById(HUB_ID).nonempty()) return;
     cy.add({
       group: 'nodes',
-      data: { id: HUB_ID, label: HUB_ID, agent: HUB_ID, tier: 1 },
+      data: { id: HUB_ID, label: hubLabel(hubState), agent: HUB_ID, tier: 1 },
       classes: 'tier1 hub',
     });
   }
 
   function removeHubIfOrphan() {
     if (!cy) return;
-    if (Object.keys(liveAgents).length === 0) {
-      var hub = cy.getElementById(HUB_ID);
-      if (hub.nonempty()) hub.remove();
-    }
+    // Keep hub if journal-active (hubState non-null) OR agents still live.
+    if (hubState !== null || Object.keys(liveAgents).length > 0) return;
+    var hub = cy.getElementById(HUB_ID);
+    if (hub.nonempty()) hub.remove();
   }
 
   // Create or update a single live-agent node from its entry. Returns true when
@@ -271,6 +290,43 @@
     });
   }
 
+  // §3.5 — one-shot launch flash on the hub→agent spoke: a bright cyan glow that
+  // accelerates the marching-ants and decays back to the resting dashed style
+  // over ~1 s. Best-effort visual nicety; a missing spoke is simply ignored.
+  function flashDispatchSpoke(targetId) {
+    if (!cy) return;
+    var spoke = cy.getElementById(HUB_ID + '->' + targetId);
+    if (spoke.empty()) return;
+    // Clear any queued/running spoke animation (e.g. the entrance fade) so the
+    // flash plays immediately rather than after it.
+    spoke.stop(true);
+    spoke.addClass('dispatch-flash');
+    spoke.style({
+      'line-color':         DISPATCH_FLASH_COLOR,
+      'target-arrow-color': DISPATCH_FLASH_COLOR,
+      'opacity':            1,
+      'width':              4,
+      'line-dash-offset':   0,
+    });
+    spoke.animate({
+      style: {
+        'line-color':         DISPATCH_DASH_COLOR,
+        'target-arrow-color': DISPATCH_DASH_COLOR,
+        'opacity':            0.45,
+        'width':              1.5,
+        'line-dash-offset':   -60, // accelerated marching-ants sweep during decay
+      },
+      duration: DISPATCH_FLASH_MS,
+      easing: 'ease-out',
+      complete: function () {
+        spoke.removeClass('dispatch-flash');
+        // Drop the inline overrides so the stylesheet + rAF flow loop fully
+        // own the spoke again.
+        spoke.removeStyle('line-color target-arrow-color opacity width line-dash-offset');
+      },
+    });
+  }
+
   function scheduleLayout() {
     if (layoutTimer) clearTimeout(layoutTimer);
     layoutTimer = setTimeout(function () {
@@ -339,6 +395,9 @@
 
     // ── §4.3 Edge flow — marching-ants on spokes to working targets ──────
     cy.edges('.dispatch').forEach(function (edge) {
+      // A spoke mid dispatch-flash (§3.5) owns its own one-shot animation; leave
+      // it alone until the burst completes and the class is removed.
+      if (edge.hasClass('dispatch-flash')) return;
       var targetId = edge.data('target');
       var target = cy.getElementById(targetId);
       var flowing = target.nonempty() &&
@@ -363,6 +422,21 @@
           'width':               1.5,
         });
       }
+    });
+
+    // ── §3.4 Hub active pulse — slow cyan halo, distinct from working ─────
+    cy.nodes('.hub.hub-active').forEach(function (node) {
+      var sin = 0.5 + 0.5 * Math.sin((ts / HUB_PULSE_PERIOD_MS) * 2 * Math.PI);
+      node.style({
+        'border-width':    3 + sin * 6,
+        'overlay-opacity': 0.04 + sin * 0.18,
+        'overlay-color':   '#00e5ff',
+      });
+    });
+
+    // ── Hub idle — reset pulse styles so they don't linger ───────────────
+    cy.nodes('.hub.hub-idle').forEach(function (node) {
+      node.style({ 'border-width': 2, 'overlay-opacity': 0 });
     });
   }
 
@@ -514,7 +588,12 @@
             (typeof entry.exitCode === 'number') ? String(entry.exitCode) : '—');
         }
       } else if (id === HUB_ID) {
-        addMetaRow('Role', 'orchestrator hub (synthetic)');
+        addMetaRow('Role', 'orchestrator (host session, inferred)');
+        if (hubState) {
+          addMetaRow('Status', hubState.state || '—');
+          if (hubState.label) addMetaRow('Activity', truncate(hubState.label, 80));
+          if (hubState.kind) addMetaRow('Kind', hubState.kind);
+        }
       }
     }
 
@@ -602,6 +681,9 @@
       ? state.dockerAvailable : undefined;
     setDockerBadge(dockerAvailable);
 
+    // Set hubState first so ensureHubNode() uses the correct label when called by setEdges/ensureSpoke.
+    hubState = (state.hub && state.hub.id) ? state.hub : null;
+
     var la = state.liveAgents || {};
     Object.keys(la).forEach(function (id) {
       var entry = la[id];
@@ -611,6 +693,17 @@
     });
 
     if (Array.isArray(state.edges)) setEdges(state.edges);
+
+    // Ensure hub node exists and is styled when journal-active (even with zero agents).
+    if (hubState) {
+      ensureHubNode();
+      var hubEle = cy.getElementById(HUB_ID);
+      if (hubEle.nonempty()) {
+        hubEle.data('label', hubLabel(hubState));
+        hubEle.removeClass('hub-active hub-idle');
+        hubEle.addClass(hubState.state === 'active' ? 'hub-active' : 'hub-idle');
+      }
+    }
 
     if (layoutTimer) { clearTimeout(layoutTimer); layoutTimer = null; }
     runLayout();
@@ -623,6 +716,9 @@
     ensureSpoke(p.nodeId); // optimistic hub + spoke until edge:update confirms
     if (added) {
       animateNodeEntrance(cy.getElementById(p.nodeId)); // §4.1
+    }
+    if (p.dispatchFlash) {
+      flashDispatchSpoke(p.nodeId); // §3.5 — correlated launch flash
     }
     scheduleLayout();
   }
@@ -650,6 +746,46 @@
     scheduleLayout();
   }
 
+  function onHubUpdate(p) {
+    if (!p) return;
+    // Removal: backend signals hub is gone (journal stale + no agents).
+    if (p.present === false || p.removed === true) {
+      hubState = null;
+      if (!cy) return;
+      if (Object.keys(liveAgents).length === 0) {
+        var ele = cy.getElementById(HUB_ID);
+        if (ele.nonempty()) {
+          // Idle wind-down: dim briefly, then remove.
+          ele.removeClass('hub-active');
+          ele.addClass('hub-idle');
+          setTimeout(function () {
+            if (hubState !== null) return; // re-activated before timer fired
+            var h = cy.getElementById(HUB_ID);
+            if (h.nonempty() && hubState === null && Object.keys(liveAgents).length === 0) {
+              h.remove();
+              scheduleLayout();
+            }
+          }, 800);
+        }
+      }
+      return;
+    }
+
+    var wasAbsent = !cy || cy.getElementById(HUB_ID).empty();
+    hubState = Object.assign({}, hubState || {}, p);
+    if (!cy) return;
+    ensureHubNode();
+    var ele = cy.getElementById(HUB_ID);
+    if (!ele || ele.empty()) return;
+    ele.data('label', hubLabel(hubState));
+    ele.removeClass('hub-active hub-idle');
+    ele.addClass(hubState.state === 'active' ? 'hub-active' : 'hub-idle');
+    if (wasAbsent) {
+      animateNodeEntrance(ele);
+      scheduleLayout();
+    }
+  }
+
   function applyPatch(event, payload) {
     payload = payload || {};
     trackDocker(payload);
@@ -658,6 +794,7 @@
       case 'agent:update': onAgentUpdate(payload); break;
       case 'agent:exit':   onAgentExit(payload);   break;
       case 'edge:update':  onEdgeUpdate(payload);  break;
+      case 'hub:update':   onHubUpdate(payload);   break;
       default: break;
     }
   }
