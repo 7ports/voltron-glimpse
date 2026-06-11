@@ -345,6 +345,8 @@
   var cy = null;
   var layoutTimer = null;
   var rafId = null;      // requestAnimationFrame handle for the pulse loop
+  var prevRafTs = 0;     // last rAF timestamp — delta-time for smooth edge flow
+  var edgeFlowAccum = 0; // accumulated marching-ants dash-offset (px)
 
   /* ──────────────────────────────────────────────────────────────────────
    * Small helpers
@@ -414,13 +416,46 @@
       elements: [],
     });
 
-    // Click a node → minimal detail tooltip. Hub has no live entry.
+    // Click a node → press feedback (scale dip + spring back) + tooltip.
     cy.on('tap', 'node', function (evt) {
-      showTooltip(evt.target);
+      var node = evt.target;
+      if (!node.hasClass('node-entering') && !node.hasClass('node-exiting')) {
+        var tier = node.data('tier') || 3;
+        var baseW = tier === 1 ? 64 : (tier === 2 ? 44 : 28);
+        node.stop(true);
+        node.animate({
+          style: { 'width': baseW * 0.88, 'height': baseW * 0.88 },
+          duration: 80,
+          easing: 'ease-in',
+          complete: function () {
+            node.animate({
+              style: { 'width': baseW * 1.06, 'height': baseW * 1.06 },
+              duration: 130,
+              easing: 'ease-out',
+              complete: function () {
+                node.animate({
+                  style: { 'width': baseW, 'height': baseW },
+                  duration: 120,
+                  easing: 'ease-in-out',
+                });
+              },
+            });
+          },
+        });
+      }
+      showTooltip(node);
     });
     // Tap empty canvas → dismiss tooltip.
     cy.on('tap', function (evt) {
       if (evt.target === cy) hideTooltip();
+    });
+
+    // Hover affordance — class drives subtle halo in the stylesheet
+    cy.on('mouseover', 'node', function (evt) {
+      evt.target.addClass('node-hovered');
+    });
+    cy.on('mouseout', 'node', function (evt) {
+      evt.target.removeClass('node-hovered');
     });
 
     startPulseLoop(); // §4.2/§4.3 — runs continuously once the graph is ready
@@ -695,7 +730,11 @@
   // their own one-shot animations running). (§4.2, §4.3)
   function pulseFrame(ts) {
     rafId = requestAnimationFrame(pulseFrame);
-    if (!cy) return;
+    if (!cy) { prevRafTs = ts; return; }
+    // Clamp delta to 100 ms so a tab-unhide pause can't jump the marching-ants.
+    var delta = prevRafTs > 0 ? Math.min(ts - prevRafTs, 100) : 16;
+    prevRafTs = ts;
+    edgeFlowAccum = (edgeFlowAccum + delta * EDGE_FLOW_SPEED) % 20;
 
     // ── §4.2 Working pulse — vivid, dominant ─────────────────────────────
     cy.nodes('.working:not(.node-entering):not(.node-exiting)').forEach(function (node) {
@@ -735,7 +774,7 @@
                     !target.hasClass('node-exiting');
       if (flowing) {
         edge.style({
-          'line-dash-offset':   -((ts * EDGE_FLOW_SPEED) % 20),
+          'line-dash-offset':   -edgeFlowAccum,
           'opacity':             0.85,
           'line-color':          '#4caf50',
           'target-arrow-color':  '#4caf50',
@@ -790,23 +829,30 @@
       'overlay-opacity': 0,
     });
 
-    // Scale + fade in over 450 ms
+    // Scale + fade in: slight overshoot then settle (spring feel)
     ele.animate({
-      style: { 'opacity': 1, 'width': targetW, 'height': targetW },
-      duration: 450,
+      style: { 'opacity': 1, 'width': targetW * 1.10, 'height': targetW * 1.10 },
+      duration: 300,
       easing: 'ease-out',
       complete: function () {
-        ele.removeClass('node-entering');
-        // One-shot ripple: overlay flashes then fades
         ele.animate({
-          style: { 'overlay-opacity': 0.50, 'overlay-color': '#4caf50' },
-          duration: 180,
-          easing: 'ease-out',
+          style: { 'width': targetW, 'height': targetW },
+          duration: 200,
+          easing: 'ease-in-out',
           complete: function () {
+            ele.removeClass('node-entering');
+            // One-shot ripple: overlay flashes then fades
             ele.animate({
-              style: { 'overlay-opacity': 0 },
-              duration: 320,
-              easing: 'ease-in',
+              style: { 'overlay-opacity': 0.55, 'overlay-color': '#4caf50' },
+              duration: 160,
+              easing: 'ease-out',
+              complete: function () {
+                ele.animate({
+                  style: { 'overlay-opacity': 0 },
+                  duration: 380,
+                  easing: 'ease-in',
+                });
+              },
             });
           },
         });
@@ -818,7 +864,7 @@
     var spoke = cy.getElementById(hubIdForPod(nodePodKey) + '->' + ele.id());
     if (spoke.nonempty()) {
       spoke.style({ 'opacity': 0 });
-      spoke.animate({ style: { 'opacity': 0.45 }, duration: 450, easing: 'ease-out' });
+      spoke.animate({ style: { 'opacity': 0.45 }, duration: 500, easing: 'ease-in-out' });
     }
   }
 
@@ -877,7 +923,7 @@
               complete: function () {
                 // Spoke retracts toward hub as node fades.
                 if (spoke && spoke.nonempty()) {
-                  spoke.animate({ style: { 'opacity': 0 }, duration: 400 });
+                  spoke.animate({ style: { 'opacity': 0 }, duration: 400, easing: 'ease-in' });
                 }
                 // 3. Linger, then hard-remove.
                 setTimeout(function () {

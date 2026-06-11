@@ -13,6 +13,9 @@
  */
 
 /* Live-centric palette — 4-state model only (§2.4) */
+/* Motion duration constants (ms) — keep a small token set for cohesion */
+var _DUR = { fast: 120, base: 240, slow: 480 };
+
 var _C = {
   dispatching:    '#2196f3',
   working:        '#4caf50',
@@ -51,6 +54,11 @@ window.GLIMPSE_CYTO_STYLE = [
       'overlay-opacity':    0,
       'overlay-color':      _C.working,
       'z-index':            10,
+      /* Smooth state-class transitions (background-color + border-color are
+         class-driven; border-width + overlay-opacity stay rAF-owned) */
+      'transition-property':        'background-color, border-color',
+      'transition-duration':        _DUR.base,
+      'transition-timing-function': 'ease-in-out',
     }
   },
 
@@ -64,6 +72,9 @@ window.GLIMPSE_CYTO_STYLE = [
       'color':             '#ffffff',
       'font-weight':       'bold',
       'overlay-color':     _C.hub,
+      'transition-property':        'background-color, border-color, opacity',
+      'transition-duration':        _DUR.slow,
+      'transition-timing-function': 'ease-in-out',
     }
   },
 
@@ -160,6 +171,18 @@ window.GLIMPSE_CYTO_STYLE = [
     }
   },
 
+  /* ─── Hover affordance: class added by app.js mouseover/mouseout events ─
+   * overlay-opacity is visible on hub-idle / exiting nodes; working/dispatching
+   * nodes have rAF-driven inline overlay-opacity that takes precedence.        */
+  {
+    selector: 'node.node-hovered:not(.node-entering):not(.node-exiting)',
+    style: {
+      'overlay-opacity': 0.07,
+      'overlay-color':   'rgba(255,255,255,0.9)',
+      'z-index':         15,
+    }
+  },
+
   /* ─── Selection ─────────────────────────────────────────────────────── */
   {
     selector: 'node:selected',
@@ -167,7 +190,8 @@ window.GLIMPSE_CYTO_STYLE = [
       'border-color':    _C.accent,
       'border-width':    3,
       'overlay-color':   _C.accent,
-      'overlay-opacity': 0.10,
+      'overlay-opacity': 0.12,
+      'z-index':         20,
     }
   },
 

@@ -48,6 +48,14 @@
   --shadow-sm: 0 2px 8px  rgba(0, 0, 0, 0.25);
   --shadow-md: 0 4px 16px rgba(0, 0, 0, 0.40);
   --shadow-lg: 0 8px 32px rgba(0, 0, 0, 0.55);
+
+  /* Motion — small token set for cohesive timing across all DOM transitions */
+  --motion-fast: 120ms;
+  --motion-base: 240ms;
+  --motion-slow: 480ms;
+  --easing-standard:   cubic-bezier(0.4, 0, 0.2, 1);   /* general purpose */
+  --easing-decelerate: cubic-bezier(0, 0, 0.2, 1);      /* things entering */
+  --easing-accelerate: cubic-bezier(0.4, 0, 1, 1);      /* things leaving */
 }
 
 /* =============================================================
@@ -149,7 +157,10 @@ html, body {
   backdrop-filter: var(--blur-sm);
   -webkit-backdrop-filter: var(--blur-sm);
   border: 1px solid var(--color-border);
-  transition: opacity 0.3s;
+  transition: opacity      var(--motion-base) var(--easing-standard),
+              background   var(--motion-base) var(--easing-standard),
+              border-color var(--motion-base) var(--easing-standard),
+              color        var(--motion-base) var(--easing-standard);
 }
 
 /* WS connection states */
@@ -236,7 +247,10 @@ html, body {
   cursor: pointer;
   backdrop-filter: var(--blur-sm);
   -webkit-backdrop-filter: var(--blur-sm);
-  transition: background 0.15s, color 0.15s;
+  transition: background  var(--motion-fast) var(--easing-standard),
+              color       var(--motion-fast) var(--easing-standard),
+              transform   var(--motion-fast) var(--easing-standard),
+              box-shadow  var(--motion-fast) var(--easing-standard);
 }
 
 .toolbar-btn:hover,
@@ -244,6 +258,10 @@ html, body {
   background: var(--color-bg-surface-hi);
   color: var(--color-accent);
   outline: none;
+}
+
+.toolbar-btn:active {
+  transform: scale(0.90);
 }
 
 /* =============================================================
@@ -398,7 +416,13 @@ html, body {
   border-radius: var(--radius-md);
   box-shadow: var(--shadow-md);
   z-index: 50;
-  animation: fade-in-up 0.15s ease;
+  /* Fade+slide in/out — .hidden override below controls the hidden state */
+  opacity: 1;
+  visibility: visible;
+  transform: translateY(0);
+  transition: opacity    var(--motion-fast) var(--easing-decelerate),
+              transform  var(--motion-fast) var(--easing-decelerate),
+              visibility 0s;
 }
 
 .tooltip-header {
@@ -429,7 +453,8 @@ html, body {
   font-size: var(--text-sm);
   cursor: pointer;
   border-radius: var(--radius-sm);
-  transition: background 0.15s, color 0.15s;
+  transition: background var(--motion-fast) var(--easing-standard),
+              color      var(--motion-fast) var(--easing-standard);
 }
 
 /* Expand touch target to 44×44 without enlarging the visual */
@@ -469,6 +494,21 @@ html, body {
    Utility
    ============================================================= */
 .hidden { display: none !important; }
+
+/* Tooltip uses opacity/visibility fade instead of display:none.
+   Specificity 0,2,0 beats .hidden (0,1,0) even with !important. */
+.node-tooltip.hidden {
+  display: block !important;
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transform: translateY(6px);
+  /* Delay visibility so it stays accessible during fade-out */
+  transition: opacity    var(--motion-fast) var(--easing-accelerate),
+              transform  var(--motion-fast) var(--easing-accelerate),
+              visibility 0s var(--motion-fast);
+}
+
 .sr-only {
   position: absolute;
   width: 1px; height: 1px;
