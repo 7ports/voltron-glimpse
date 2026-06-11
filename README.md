@@ -9,19 +9,29 @@ on `127.0.0.1`.
 
 ---
 
-## Install
+## Installation
 
 **Node 20 LTS or newer required. Docker must be available on the host for primary mode.**
 
-```bash
-npm i -g voltron-glimpse
-```
-
-Or run without installing:
+Run without installing, straight from GitHub:
 
 ```bash
-npx voltron-glimpse
+npx github:7ports/voltron-glimpse
 ```
+
+Global install from the feature branch (works today, pre-merge):
+
+```bash
+npm install -g github:7ports/voltron-glimpse#feat/glimpse-implementation
+```
+
+Once merged to `main`, install from the default branch:
+
+```bash
+npm install -g github:7ports/voltron-glimpse
+```
+
+Installing globally exposes the `voltron-glimpse` command, which you run at the root of any Voltron project.
 
 ---
 

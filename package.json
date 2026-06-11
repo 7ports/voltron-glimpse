@@ -4,11 +4,22 @@
   "description": "Real-time, read-only visualizer companion for Project Voltron agent runs.",
   "license": "MIT",
   "author": "RAJESH PUJARA <rapajara@gmail.com>",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/7ports/voltron-glimpse.git"
+  },
   "type": "commonjs",
   "main": "bin/cli.js",
   "bin": {
     "voltron-glimpse": "./bin/cli.js"
   },
+  "files": [
+    "bin/",
+    "src/",
+    "public/",
+    "README.md",
+    "LICENSE"
+  ],
   "engines": {
     "node": ">=20"
   },
