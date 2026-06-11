@@ -47,6 +47,72 @@ test('pollTail: tails appended bytes exactly once (offset advances, no re-proces
   await w.close();
 });
 
+test('syncLogRoots: a FOREIGN pod root is tailed from offset 0 and routes into the same sink', async () => {
+  const self = mkTmpRoot();
+  const foreign = mkTmpRoot();
+  const foreignLogsDir = path.join(foreign, '.voltron', 'logs');
+  const foreignLog = path.join(foreignLogsDir, 'committer-2026-06-10T11-00-00.log');
+
+  // The foreign container is already running, so its log already has lifecycle
+  // lines BEFORE we begin watching — these must be read (catch-up), not skipped.
+  fs.writeFileSync(
+    foreignLog,
+    '[entry] committer-2026-06-10T11-00-00\n[exec] committer-2026-06-10T11-00-00\n[STEP 1] staging\n'
+  );
+
+  const events = [];
+  const w = createWatcher(self, (e) => events.push(e));
+  w.scanExisting(); // seeds ONLY the self root (foreign must not be seeded)
+
+  // Self root has no logs -> nothing yet.
+  w.pollTail();
+  assert.strictEqual(events.length, 0, 'self root empty, no events');
+
+  // Foreign pod appears in scope.
+  w.syncLogRoots([{ root: foreign, podKey: 'foreign', podLabel: 'foreign' }]);
+  w.pollTail();
+  assert.strictEqual(events.length, 1, 'foreign log read from offset 0 in one consolidated event');
+  assert.strictEqual(events[0].agent, 'committer');
+  assert.strictEqual(events[0].state, 'working', '[exec] in the existing foreign log => working');
+  assert.strictEqual(events[0].latestStep, '[STEP 1] staging');
+
+  // Idempotent: no growth => no re-processing.
+  w.pollTail();
+  assert.strictEqual(events.length, 1);
+
+  // Append more to the foreign log -> only the new bytes are tailed.
+  fs.appendFileSync(foreignLog, '[exit] committer-2026-06-10T11-00-00 code=0\n');
+  w.pollTail();
+  assert.strictEqual(events.length, 2, 'foreign append tailed once');
+  assert.strictEqual(events[1].state, 'done');
+
+  // Pod leaves scope -> its root is dropped; further appends are not read.
+  w.syncLogRoots([]);
+  fs.appendFileSync(foreignLog, '[STEP 2] ghost\n');
+  w.pollTail();
+  assert.strictEqual(events.length, 2, 'dropped foreign root is no longer tailed');
+
+  await w.close();
+});
+
+test('syncLogRoots: the self/pinned root is never dropped even when sync excludes it', async () => {
+  const self = mkTmpRoot();
+  const logFile = path.join(self, '.voltron', 'logs', 'fullstack-dev-2026-06-10T12-00-00.log');
+
+  const events = [];
+  const w = createWatcher(self, (e) => events.push(e));
+  w.scanExisting();
+
+  // Sync with an empty list — self must stay pinned.
+  w.syncLogRoots([]);
+  fs.writeFileSync(logFile, '[entry] fullstack-dev-2026-06-10T12-00-00\n');
+  w.pollTail();
+  assert.strictEqual(events.length, 1, 'self root still tailed after an empty sync');
+  assert.strictEqual(events[0].state, 'dispatching');
+
+  await w.close();
+});
+
 test('pollTail: tolerates a missing logs dir without throwing', () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'glimpse-watcher-nodir-'));
   // No .voltron/logs created on purpose.

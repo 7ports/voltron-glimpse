@@ -203,6 +203,47 @@ function scanLogsForFreshness(logsDir) {
   return out;
 }
 
+// Is a pod's host log dir actually resolvable + readable? Returns the resolved
+// `<podRoot>/.voltron/logs` path when readable, else null. Read-only stat/access.
+function readableLogDir(podRoot) {
+  if (!podRoot || typeof podRoot !== 'string') return null;
+  const logsDir = path.join(podRoot, '.voltron', 'logs');
+  try {
+    const st = fs.statSync(logsDir);
+    if (!st.isDirectory()) return null;
+    fs.accessSync(logsDir, fs.constants.R_OK);
+    return logsDir;
+  } catch (_e) {
+    return null;
+  }
+}
+
+// Mutate each scoped container with `observed` (are its logs actually watched?)
+// and collect the distinct FOREIGN pod roots whose log dirs are readable so the
+// watcher can tail them. Self-pod containers are always observed (self log root is
+// pinned). A foreign pod with an unreadable/unresolvable log dir is flagged
+// observed:false — honest "logs unobserved" rather than a perpetual dispatch.
+function planLogObservability(containers) {
+  const roots = new Map(); // podRoot -> { root, podKey, podLabel }
+  for (const c of Array.isArray(containers) ? containers : []) {
+    if (!c) continue;
+    if (c.selfPod === true) {
+      c.observed = true;
+      continue;
+    }
+    const logsDir = readableLogDir(c.podRoot);
+    if (logsDir) {
+      c.observed = true;
+      if (!roots.has(c.podRoot)) {
+        roots.set(c.podRoot, { root: c.podRoot, podKey: c.podKey, podLabel: c.podLabel });
+      }
+    } else {
+      c.observed = false;
+    }
+  }
+  return Array.from(roots.values());
+}
+
 async function main() {
   const opts = parseArgs(process.argv.slice(2));
 
@@ -277,6 +318,12 @@ async function main() {
     // Authoritative membership from `docker ps`.
     const pollOnce = async function () {
       const result = await pollDocker({ cwd: projectRoot, podCache, selfPodKey, scope: podScope });
+      // Multi-root log watching: flag each container's observability and watch every
+      // in-scope FOREIGN pod's log dir (self is pinned). Done BEFORE applyDockerPoll
+      // so entries carry `observed`, and BEFORE pollTail so a freshly-appeared pod's
+      // logs are tailed this same tick (advancing it past `dispatching`).
+      const foreignRoots = planLogObservability(result.containers);
+      watcher.syncLogRoots(foreignRoots);
       reconciler.applyDockerPoll(result);
       // Poll-driven log re-tail on the same cadence: advance [exec]/[STEP]/[exit]
       // enrichment without depending on chokidar native fs-watch events firing

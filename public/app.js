@@ -671,28 +671,37 @@
     }, RELAYOUT_DEBOUNCE_MS);
   }
 
-  // Built-in concentric layout (no dagre): hub / tier-1 at the center, higher
-  // tiers fan outward. In multi-pod mode, run a separate concentric per pod
-  // cluster positioned in a grid so pods occupy distinct screen regions.
+  // Radial breadthfirst layout (no dagre, no external deps): hub is the root
+  // pinned at the center; agent spokes fan out to a depth-1 ring around it.
+  // Multi-pod: one cluster per pod in a non-overlapping grid, each with its
+  // own pod-hub as root so every sub-graph reads as a distinct wheel.
   function runLayout() {
     if (!cy || cy.nodes().length === 0) return;
     try {
       if (!multiPodMode) {
+        // Single-pod radial tree: hub→agents fan out like wheel spokes.
+        // Fall back to tier1 selector when hub hasn't appeared yet.
+        var hubEle = cy.getElementById(HUB_ID);
+        var rootSel = hubEle.nonempty() ? '#' + HUB_ID : '.tier1';
         cy.layout({
-          name: 'concentric',
-          concentric: function (node) { return 4 - (node.data('tier') || 3); },
-          levelWidth: function () { return 1; },
-          minNodeSpacing: 42,
+          name: 'breadthfirst',
+          circle: true,
+          directed: true,
+          roots: rootSel,
+          spacingFactor: 1.85,
           animate: true,
           animationDuration: LAYOUT_ANIM_MS,
+          animationEasing: 'ease-in-out',
           fit: true,
           padding: 48,
+          avoidOverlap: true,
         }).run();
       } else {
-        // Per-pod concentric clusters arranged in a grid of non-overlapping regions.
+        // Multi-pod: radial breadthfirst per pod cluster, grid-arranged so each
+        // pod occupies a distinct non-overlapping screen region.
         var podKeys = Object.keys(podRegistry);
         var cols = Math.max(1, Math.ceil(Math.sqrt(podKeys.length)));
-        var groupSize = 360;
+        var groupSize = 380;
         var layoutsStarted = 0;
         podKeys.forEach(function (podKey, idx) {
           var pid = compoundParentId(podKey);
@@ -702,21 +711,27 @@
           if (children.length === 0) return;
           var col = idx % cols;
           var row = Math.floor(idx / cols);
+          var hid = hubIdForPod(podKey);
+          var hubChild = cy.getElementById(hid);
+          var rootSel = hubChild.nonempty() ? '#' + hid : '.tier1';
           layoutsStarted++;
           children.layout({
-            name: 'concentric',
-            concentric: function (node) { return 4 - (node.data('tier') || 3); },
-            levelWidth: function () { return 1; },
-            minNodeSpacing: 32,
+            name: 'breadthfirst',
+            circle: true,
+            directed: true,
+            roots: rootSel,
+            spacingFactor: 1.6,
             animate: true,
             animationDuration: LAYOUT_ANIM_MS,
+            animationEasing: 'ease-in-out',
             fit: false,
             padding: 20,
+            avoidOverlap: true,
             boundingBox: {
               x1: col * groupSize,
               y1: row * groupSize,
-              w: groupSize - 30,
-              h: groupSize - 30,
+              w: groupSize - 40,
+              h: groupSize - 40,
             },
           }).run();
         });
@@ -1092,6 +1107,17 @@
       stepEl.className = 'progress-step';
       stepEl.textContent = stepText;
       statusLine.appendChild(stepEl);
+    }
+
+    // Honest hint: a foreign pod whose host log dir couldn't be resolved/read has
+    // no [exec]/[STEP]/[exit] source, so its state can't advance. Say so plainly
+    // rather than implying it's stuck mid-dispatch. (observed defaults true.)
+    if (entry.observed === false && !terminal) {
+      var unobserved = document.createElement('span');
+      unobserved.className = 'progress-unobserved';
+      unobserved.textContent = 'logs unobserved';
+      unobserved.title = 'This pod\'s host log directory could not be read, so step/exit progress is unavailable.';
+      statusLine.appendChild(unobserved);
     }
 
     // Live elapsed clock since [exec], falling back to container createdAt.

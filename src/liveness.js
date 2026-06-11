@@ -102,6 +102,10 @@ function createReconciler({
   }
 
   function containerMatches(pdAgent, container) {
+    // The journal is the SELF pod's; a dispatch must only correlate to a
+    // self-pod container. Without this guard a same-named agent in a FOREIGN
+    // pod could steal the flash + task prose (a cross-pod honesty bug).
+    if (container.selfPod !== true) return false;
     return (
       pdAgent === normalizeAgent(container.agent) ||
       pdAgent === normalizeAgent(container.nodeId)
@@ -133,6 +137,12 @@ function createReconciler({
       podKey: e.podKey != null ? e.podKey : null,
       podLabel: e.podLabel != null ? e.podLabel : null,
       selfPod: e.selfPod === true,
+      // observed: are this container's logs actually being tailed? false means its
+      // pod's host log dir could not be resolved/read (foreign pod, path-translation
+      // failure, permission denied, missing dir) — so [exec]/[STEP]/[exit] will
+      // never arrive and the UI must say "logs unobserved" rather than imply a
+      // perpetually-stuck dispatch. Defaults true unless explicitly flagged false.
+      observed: e.observed !== false,
       state: e.state,
       step: e.step,
       exitCode: e.exitCode,
@@ -227,6 +237,7 @@ function createReconciler({
           podKey: c.podKey != null ? c.podKey : null,
           podLabel: c.podLabel != null ? c.podLabel : null,
           selfPod: c.selfPod === true,
+          observed: c.observed !== false,
           state: 'dispatching',
           step: null,
           exitScheduled: false,
@@ -249,6 +260,7 @@ function createReconciler({
           podKey: c.podKey != null ? c.podKey : null,
           podLabel: c.podLabel != null ? c.podLabel : null,
           selfPod: c.selfPod === true,
+          observed: c.observed !== false,
           state: 'dispatching',
         };
         // §3.5: correlate a recent dispatch to this fresh container; flash once
@@ -266,6 +278,15 @@ function createReconciler({
           }
         }
         bus.emit(EVENTS.AGENT_ENTER, enterPayload);
+      } else {
+        // Existing container: observability can flip once a previously-unresolved
+        // pod mount-source resolves (or its log dir appears). Keep it honest.
+        const entry = liveAgents.get(nodeId);
+        const nextObserved = c.observed !== false;
+        if (entry && !entry.exitScheduled && entry.observed !== nextObserved) {
+          entry.observed = nextObserved;
+          bus.emit(EVENTS.AGENT_UPDATE, { nodeId, observed: nextObserved });
+        }
       }
     }
 

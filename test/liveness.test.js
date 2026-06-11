@@ -52,6 +52,7 @@ const A = {
   createdAt: '2026-06-09 10:00:00 +0000 UTC',
   state: 'running',
   status: 'Up 1 second',
+  selfPod: true,
 };
 const B = {
   id: 'idB',
@@ -61,6 +62,7 @@ const B = {
   createdAt: '2026-06-09 10:00:01 +0000 UTC',
   state: 'running',
   status: 'Up 1 second',
+  selfPod: true,
 };
 
 test('docker poll of [A,B] emits two enters and an edge set of hub + 2 spokes', () => {
@@ -313,6 +315,28 @@ test('dispatch journal naming A + a container A entering within the window flash
   assert.strictEqual(enterA[0].p.dispatchFlash, true);
 });
 
+test('a same-named agent in a FOREIGN pod does NOT get the self pod\'s flash', () => {
+  const timer = makeFakeTimer();
+  const bus = createEventBus();
+  const ev = collect(bus);
+  const r = createReconciler({ bus, timer, dispatchWindowMs: 10000 });
+
+  // The journal (self pod) dispatches agent A; only a foreign-pod container A
+  // enters within the window. The flash must NOT cross pods.
+  const foreignA = { ...A, selfPod: false };
+  r.applyJournalEvent(
+    makeJournal({ kind: 'dispatch', text: 'Dispatched A (B1) to implement the WS handler' })
+  );
+  timer.advance(3000); // inside the correlation window
+  r.applyDockerPoll({ available: true, containers: [foreignA] });
+
+  const enterA = ev.filter((e) => e.type === 'enter' && e.p.nodeId === 'A');
+  assert.strictEqual(enterA.length, 1);
+  assert.ok(!enterA[0].p.dispatchFlash, 'foreign-pod container gets no self-pod flash');
+  const a = r.snapshot().liveAgents.find((e) => e.nodeId === 'A');
+  assert.strictEqual(a.dispatchTaskText, null, 'no self-pod task prose attached cross-pod');
+});
+
 test('a container entering AFTER the correlation window does NOT flash', () => {
   const timer = makeFakeTimer();
   const bus = createEventBus();
@@ -435,6 +459,85 @@ test('a dispatch journal signal with task text, then a matching enter, carries d
   const a = r.snapshot().liveAgents.find((e) => e.nodeId === 'A');
   assert.ok(a);
   assert.strictEqual(a.dispatchTaskText, 'implement the WS handler');
+});
+
+// --- Multi-pod observability (foreign-pod log enrichment) -----------------
+
+test('a foreign pod whose logs ARE observed advances dispatching -> working on [exec]', () => {
+  const timer = makeFakeTimer();
+  const bus = createEventBus();
+  const r = createReconciler({ bus, timer });
+
+  // Foreign container, but its host log dir resolved -> observed:true.
+  const foreignB = { ...B, selfPod: false, observed: true };
+  r.applyDockerPoll({ available: true, containers: [foreignB] });
+
+  let b = r.snapshot().liveAgents.find((e) => e.nodeId === 'B');
+  assert.ok(b);
+  assert.strictEqual(b.observed, true);
+  assert.strictEqual(b.state, 'dispatching');
+
+  // Its log dir is now tailed (the watcher routes foreign log events into the SAME
+  // reconciler), so [exec] arrives and it advances — no longer stuck.
+  r.applyLogEvent({ nodeId: 'B', state: 'working', exitCode: null, latestStep: '[STEP 1] go' });
+
+  b = r.snapshot().liveAgents.find((e) => e.nodeId === 'B');
+  assert.strictEqual(b.state, 'working', 'foreign-pod container advances past dispatching');
+  assert.strictEqual(b.step, '[STEP 1] go');
+  assert.strictEqual(b.observed, true);
+});
+
+test('a foreign pod whose log dir is unresolvable is flagged observed:false (honest, not stuck-without-signal)', () => {
+  const timer = makeFakeTimer();
+  const bus = createEventBus();
+  const ev = collect(bus);
+  const r = createReconciler({ bus, timer });
+
+  // Foreign container whose host log dir could not be resolved/read.
+  const foreignA = { ...A, selfPod: false, observed: false };
+  r.applyDockerPoll({ available: true, containers: [foreignA] });
+
+  const enter = ev.find((e) => e.type === 'enter' && e.p.nodeId === 'A');
+  assert.ok(enter, 'still enters as a live node');
+  assert.strictEqual(enter.p.observed, false, 'enter payload carries observed:false for the UI');
+
+  const a = r.snapshot().liveAgents.find((e) => e.nodeId === 'A');
+  assert.strictEqual(a.observed, false, 'snapshot honestly marks the node logs-unobserved');
+  // It is honestly represented (observed:false) rather than silently identical to a
+  // live dispatching node. The Docker drop still winds it down normally.
+  r.applyDockerPoll({ available: true, containers: [] });
+  timer.advance(3000);
+  assert.strictEqual(r.snapshot().liveAgents.length, 0, 'exits cleanly on Docker drop');
+});
+
+test('observed flips false -> true when a previously-unresolved pod resolves on a later poll', () => {
+  const timer = makeFakeTimer();
+  const bus = createEventBus();
+  const ev = collect(bus);
+  const r = createReconciler({ bus, timer });
+
+  r.applyDockerPoll({ available: true, containers: [{ ...B, selfPod: false, observed: false }] });
+  assert.strictEqual(r.snapshot().liveAgents.find((e) => e.nodeId === 'B').observed, false);
+  ev.length = 0;
+
+  // Next poll: the pod mount-source resolved, log dir now readable.
+  r.applyDockerPoll({ available: true, containers: [{ ...B, selfPod: false, observed: true }] });
+
+  const upd = ev.filter((e) => e.type === 'update' && e.p.nodeId === 'B' && e.p.observed === true);
+  assert.strictEqual(upd.length, 1, 'one AGENT_UPDATE carrying observed:true');
+  assert.strictEqual(r.snapshot().liveAgents.find((e) => e.nodeId === 'B').observed, true);
+});
+
+test('self-pod and default containers are observed:true (single-pod behavior unchanged)', () => {
+  const timer = makeFakeTimer();
+  const bus = createEventBus();
+  const r = createReconciler({ bus, timer });
+
+  r.applyDockerPoll({ available: true, containers: [A, B] }); // A,B selfPod:true, no observed field
+  for (const id of ['A', 'B']) {
+    const e = r.snapshot().liveAgents.find((x) => x.nodeId === id);
+    assert.strictEqual(e.observed, true, `${id} defaults observed:true`);
+  }
 });
 
 test('a non-matching enter leaves dispatchTaskText null (best-effort, never wrong)', () => {
