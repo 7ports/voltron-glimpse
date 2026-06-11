@@ -118,11 +118,11 @@ window.GLIMPSE_CYTO_STYLE = [
   },
   {
     selector: 'node.tier2',
-    style: { 'width': 44, 'height': 44, 'font-size': 10 }
+    style: { 'shape': 'rectangle', 'width': 44, 'height': 44, 'font-size': 10 }
   },
   {
     selector: 'node.tier3',
-    style: { 'width': 28, 'height': 28, 'font-size': 9, 'text-max-width': 60 }
+    style: { 'shape': 'triangle', 'width': 28, 'height': 28, 'font-size': 9, 'text-max-width': 60 }
   },
 
   /* ─── Live status colours ─────────────────────────────────────────────
