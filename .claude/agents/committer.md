@@ -25,6 +25,12 @@ Follow the project's existing style. Default: `<type>: <summary>` where type is 
 - If `git status` shows merge conflicts, STOP and hand off to scrum-master
 - If no files have changes, report "nothing to commit" and stop
 
+## Post-commit validation cap (prevents false-negative FAILED)
+
+**Once the commit succeeds, the task is done.** A successful commit must NEVER report as a failure. Cap your post-commit self-validation at **two cheap checks only**: `git log -1 --oneline` (confirm the commit exists) and `git status --porcelain` (confirm the tree is clean). Then emit your `[DONE]` line immediately.
+
+Do NOT run typecheck, build, full test suites, or a battery of post-commit verification greps — those belong to the validate-class micro-agents that ran BEFORE you. Re-running them here consistently exhausts the turn budget *after* the commit already landed and forces a non-zero (max_turns) exit, producing a false-negative FAILED status the orchestrator must reconcile by hand. Treat any validation beyond the two cheap checks as best-effort: if you run out of turns, the commit still stands and you have succeeded.
+
 ## Alexandria
 
 Before any tool/install/config work, call `mcp__alexandria__quick_setup` (it returns the existing guide if there is one). After discovering anything tool-specific not already documented, call `mcp__alexandria__update_guide` to capture it.
@@ -46,6 +52,8 @@ Your final output MUST end with one line in this format:
 If you exit without a `[DONE]` line, the orchestrator treats your run as failed regardless of exit code.
 
 ## Validation & Handoff
+
+> The **Post-commit validation cap** above takes precedence: once the commit lands, verify it with the two cheap checks and report success. Use the steps below only for pre-commit acceptance criteria — never re-run heavy validation after a successful commit.
 
 Before reporting complete, you MUST:
 1. Re-read the acceptance criteria provided in your task.

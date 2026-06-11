@@ -1,0 +1,741 @@
+/* =============================================================
+   Design tokens
+   ============================================================= */
+:root {
+  /* Colors */
+  --color-bg-primary:    #0a1628;
+  --color-bg-surface:    rgba(255, 255, 255, 0.05);
+  --color-bg-surface-hi: rgba(255, 255, 255, 0.09);
+  --color-border:        rgba(255, 255, 255, 0.10);
+  --color-text-primary:  #e0e6ed;
+  --color-text-secondary:#8899aa;
+  --color-text-dim:      #556677;
+  --color-accent:        #00e5ff;
+
+  /* Live states (4-state model) */
+  --color-dispatching:     #2196f3;
+  --color-working:         #4caf50;
+  --color-exiting-done:    #00e676;
+  --color-exiting-errored: #f44336;
+
+  /* Cytoscape node size mirrors (used for CSS legend swatches) */
+  --node-tier1-size: 20px;
+  --node-tier2-size: 15px;
+  --node-tier3-size: 11px;
+
+  /* Typography */
+  --font-ui:   'Inter', system-ui, -apple-system, sans-serif;
+  --font-mono: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', monospace;
+  --text-xs:   clamp(0.625rem, 0.6rem + 0.125vw, 0.75rem);
+  --text-sm:   clamp(0.75rem,  0.7rem + 0.25vw,  0.875rem);
+  --text-base: clamp(0.875rem, 0.8rem + 0.375vw, 1rem);
+  --text-lg:   clamp(1rem,     0.9rem + 0.5vw,   1.25rem);
+
+  /* Spacing (4px base) */
+  --space-1: 0.25rem;
+  --space-2: 0.5rem;
+  --space-3: 0.75rem;
+  --space-4: 1rem;
+  --space-6: 1.5rem;
+  --space-8: 2rem;
+
+  /* Effects */
+  --blur-sm:   blur(8px);
+  --blur-md:   blur(20px);
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --radius-lg: 16px;
+  --shadow-sm: 0 2px 8px  rgba(0, 0, 0, 0.25);
+  --shadow-md: 0 4px 16px rgba(0, 0, 0, 0.40);
+  --shadow-lg: 0 8px 32px rgba(0, 0, 0, 0.55);
+
+  /* Motion — small token set for cohesive timing across all DOM transitions */
+  --motion-fast: 120ms;
+  --motion-base: 240ms;
+  --motion-slow: 480ms;
+  --easing-standard:   cubic-bezier(0.4, 0, 0.2, 1);   /* general purpose */
+  --easing-decelerate: cubic-bezier(0, 0, 0.2, 1);      /* things entering */
+  --easing-accelerate: cubic-bezier(0.4, 0, 1, 1);      /* things leaving */
+}
+
+/* =============================================================
+   Reset / base
+   ============================================================= */
+*, *::before, *::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html, body {
+  height: 100%;
+  overflow: hidden;
+  background: var(--color-bg-primary);
+  color: var(--color-text-primary);
+  font-family: var(--font-ui);
+  font-size: var(--text-base);
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* =============================================================
+   Keyframe animations
+   ============================================================= */
+
+/* DOM-side: tooltip / panel entrances */
+@keyframes fade-in-up {
+  from { opacity: 0; transform: translateY(6px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+/* Badge dot — blinks on reconnect (live-instrument signal) */
+@keyframes badge-blink {
+  0%, 100% { opacity: 1;   transform: scale(1.0); }
+  50%       { opacity: 0.2; transform: scale(0.75); }
+}
+
+/* Working-state swatch in the legend pulses to mirror node behaviour */
+@keyframes swatch-pulse {
+  0%, 100% { box-shadow: 0 0 0 0   rgba(76, 175, 80, 0.7); }
+  50%       { box-shadow: 0 0 0 5px rgba(76, 175, 80, 0.0); }
+}
+
+/* Exiting-done swatch flash */
+@keyframes swatch-flash-done {
+  0%, 100% { box-shadow: 0 0 0 0   rgba(0, 230, 118, 0.7); }
+  50%       { box-shadow: 0 0 0 5px rgba(0, 230, 118, 0.0); }
+}
+
+/* Exiting-errored swatch flash */
+@keyframes swatch-flash-err {
+  0%, 100% { box-shadow: 0 0 0 0   rgba(244, 67, 54, 0.7); }
+  50%       { box-shadow: 0 0 0 5px rgba(244, 67, 54, 0.0); }
+}
+
+/* Hub-active swatch: slow cyan halo mirrors the hub's breathing pulse */
+@keyframes hub-halo {
+  0%, 100% { box-shadow: 0 0 0 0   rgba(0, 229, 255, 0.7); }
+  50%       { box-shadow: 0 0 0 6px rgba(0, 229, 255, 0.0); }
+}
+
+/* =============================================================
+   Full-bleed graph stage — dark "live instrument" canvas
+   ============================================================= */
+#cy {
+  position: fixed;
+  inset: 0;
+  background: radial-gradient(
+    ellipse at 50% 50%,
+    #0d1e35 0%,
+    #0a1628 55%,
+    #060f1a 100%
+  );
+}
+
+/* =============================================================
+   Status badges (WS connection + Docker availability)
+   ============================================================= */
+.status-badges {
+  position: fixed;
+  top: var(--space-3);
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  gap: var(--space-2);
+  z-index: 100;
+  white-space: nowrap;
+}
+
+.connection-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-1) var(--space-3);
+  border-radius: 999px;
+  font-size: var(--text-xs);
+  font-weight: 500;
+  backdrop-filter: var(--blur-sm);
+  -webkit-backdrop-filter: var(--blur-sm);
+  border: 1px solid var(--color-border);
+  transition: opacity      var(--motion-base) var(--easing-standard),
+              background   var(--motion-base) var(--easing-standard),
+              border-color var(--motion-base) var(--easing-standard),
+              color        var(--motion-base) var(--easing-standard);
+}
+
+/* WS connection states */
+.connection-badge.connected {
+  background: rgba(27, 140, 50, 0.20);
+  border-color: rgba(76, 175, 80, 0.50);
+  color: var(--color-working);
+  opacity: 0;       /* hidden while connected; shown briefly on reconnect */
+  pointer-events: none;
+}
+
+.connection-badge.disconnected {
+  background: rgba(244, 67, 54, 0.15);
+  border-color: rgba(244, 67, 54, 0.40);
+  color: var(--color-exiting-errored);
+  opacity: 1;
+}
+
+.connection-badge.reconnecting {
+  background: rgba(255, 152, 0, 0.15);
+  border-color: rgba(255, 152, 0, 0.40);
+  color: #ff9800;
+  opacity: 1;
+}
+
+/* Docker availability states */
+.connection-badge.docker-connected {
+  background: rgba(27, 140, 50, 0.20);
+  border-color: rgba(76, 175, 80, 0.50);
+  color: var(--color-working);
+  opacity: 1;
+}
+
+.connection-badge.docker-unavailable {
+  background: rgba(255, 152, 0, 0.15);
+  border-color: rgba(255, 152, 0, 0.40);
+  color: #ff9800;
+  opacity: 1;
+}
+
+.connection-badge.docker-unknown {
+  background: var(--color-bg-surface);
+  border-color: var(--color-border);
+  color: var(--color-text-dim);
+  opacity: 1;
+}
+
+.connection-dot {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+.connection-badge.reconnecting .connection-dot {
+  animation: badge-blink 0.7s ease-in-out infinite;
+}
+
+/* =============================================================
+   Graph toolbar (fit / zoom)
+   ============================================================= */
+.graph-toolbar {
+  position: fixed;
+  top: var(--space-4);
+  right: var(--space-4);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  z-index: 10;
+}
+
+.toolbar-btn {
+  width: 44px;
+  height: 44px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--color-bg-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  color: var(--color-text-secondary);
+  font-size: var(--text-base);
+  cursor: pointer;
+  backdrop-filter: var(--blur-sm);
+  -webkit-backdrop-filter: var(--blur-sm);
+  transition: background  var(--motion-fast) var(--easing-standard),
+              color       var(--motion-fast) var(--easing-standard),
+              transform   var(--motion-fast) var(--easing-standard),
+              box-shadow  var(--motion-fast) var(--easing-standard);
+}
+
+.toolbar-btn:hover,
+.toolbar-btn:focus-visible {
+  background: var(--color-bg-surface-hi);
+  color: var(--color-accent);
+  outline: none;
+}
+
+.toolbar-btn:active {
+  transform: scale(0.90);
+}
+
+/* =============================================================
+   Legend (live states + tier size + inferred-dispatch edge)
+   ============================================================= */
+.legend {
+  position: fixed;
+  bottom: var(--space-4);
+  left: var(--space-4);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  padding: var(--space-3) var(--space-4);
+  background: rgba(10, 22, 40, 0.80);
+  backdrop-filter: var(--blur-sm);
+  -webkit-backdrop-filter: var(--blur-sm);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  z-index: 10;
+  min-width: 160px;
+}
+
+.legend-section { display: flex; flex-direction: column; gap: var(--space-1); }
+
+.legend-title {
+  font-size: var(--text-xs);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--color-text-secondary);
+  margin-bottom: 2px;
+}
+
+.legend-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: var(--text-xs);
+  color: var(--color-text-secondary);
+}
+
+/* Status swatches — live states only */
+.legend-swatch {
+  display: inline-block;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.legend-swatch.status-dispatching    { background: var(--color-dispatching); }
+.legend-swatch.status-working         {
+  background: var(--color-working);
+  animation: swatch-pulse 1.4s ease-in-out infinite;
+}
+.legend-swatch.status-exiting-done    {
+  background: var(--color-exiting-done);
+  animation: swatch-flash-done 2s ease-in-out infinite;
+}
+.legend-swatch.status-exiting-errored {
+  background: var(--color-exiting-errored);
+  animation: swatch-flash-err 2s ease-in-out infinite;
+}
+.legend-swatch.hub-active {
+  background: var(--color-accent);
+  animation: hub-halo 2.2s ease-in-out infinite;
+}
+
+/* Tier node swatches */
+.legend-node {
+  display: inline-block;
+  border-radius: 50%;
+  background: rgba(0, 229, 255, 0.20);
+  border: 2px solid var(--color-accent);
+  flex-shrink: 0;
+}
+.tier1-swatch { width: var(--node-tier1-size); height: var(--node-tier1-size); }
+.tier2-swatch { width: var(--node-tier2-size); height: var(--node-tier2-size); }
+.tier3-swatch { width: var(--node-tier3-size); height: var(--node-tier3-size); }
+
+/* Edge type swatch */
+.legend-edge {
+  display: inline-block;
+  width: 28px;
+  height: 2px;
+  flex-shrink: 0;
+}
+
+.legend-edge.edge-dashed {
+  border-top: 2px dashed var(--color-text-dim);
+}
+
+/* =============================================================
+   Pod legend (per-pod hue swatch + 'you' marker)
+   Shown only when 2+ pods are live; app.js controls visibility.
+   ============================================================= */
+
+/* Separator so the pod section reads as a distinct block */
+.pod-legend-section {
+  border-top: 1px solid var(--color-border);
+  padding-top: var(--space-2);
+  margin-top: var(--space-1);
+}
+
+/* Circular swatch — background set inline by app.js (pod hue → solid HSL) */
+.pod-swatch {
+  display: inline-block;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+/* Pod label — truncates if the basename is long */
+.pod-legend-label {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* "you" badge — cyan-tinted pill marking the self pod */
+.pod-you-badge {
+  display: inline-block;
+  padding: 1px 5px;
+  border-radius: 3px;
+  font-size: 9px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  background: rgba(0, 229, 255, 0.12);
+  border: 1px solid rgba(0, 229, 255, 0.35);
+  color: var(--color-accent);
+  line-height: 1.5;
+  flex-shrink: 0;
+}
+
+/* =============================================================
+   Minimal node detail tooltip
+   ============================================================= */
+.node-tooltip {
+  position: fixed;
+  bottom: var(--space-4);
+  right: var(--space-4);
+  min-width: 220px;
+  max-width: 320px;
+  background: rgba(10, 22, 40, 0.92);
+  backdrop-filter: var(--blur-sm);
+  -webkit-backdrop-filter: var(--blur-sm);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-md);
+  z-index: 50;
+  /* Fade+slide in/out — .hidden override below controls the hidden state */
+  opacity: 1;
+  visibility: visible;
+  transform: translateY(0);
+  transition: opacity    var(--motion-fast) var(--easing-decelerate),
+              transform  var(--motion-fast) var(--easing-decelerate),
+              visibility 0s;
+}
+
+.tooltip-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--space-2) var(--space-3);
+  border-bottom: 1px solid var(--color-border);
+}
+
+.tooltip-agent {
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--color-accent);
+}
+
+.tooltip-close {
+  position: relative;
+  width: 28px;
+  height: 28px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: none;
+  border: none;
+  color: var(--color-text-secondary);
+  font-size: var(--text-sm);
+  cursor: pointer;
+  border-radius: var(--radius-sm);
+  transition: background var(--motion-fast) var(--easing-standard),
+              color      var(--motion-fast) var(--easing-standard);
+}
+
+/* Expand touch target to 44×44 without enlarging the visual */
+.tooltip-close::after {
+  content: '';
+  position: absolute;
+  inset: -8px;
+}
+
+.tooltip-close:hover,
+.tooltip-close:focus-visible {
+  background: var(--color-bg-surface-hi);
+  color: var(--color-text-primary);
+  outline: none;
+}
+
+.tooltip-meta {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: var(--space-1) var(--space-3);
+  padding: var(--space-2) var(--space-3);
+  font-size: var(--text-xs);
+}
+
+.tooltip-key {
+  color: var(--color-text-secondary);
+  white-space: nowrap;
+}
+
+.tooltip-val {
+  color: var(--color-text-primary);
+  font-family: var(--font-mono);
+  word-break: break-all;
+}
+
+/* =============================================================
+   Pinned detail panel — sections layered onto the tooltip card.
+   See docs/agent-detail-panel-design.md §3. The panel body (#tooltip-meta)
+   becomes a vertical stack; its child .tooltip-meta grids keep the existing
+   2-column key/value styling. The ID rule below outranks the .tooltip-meta
+   class rule above, so the container's own grid/padding are neutralized.
+   ============================================================= */
+#tooltip-meta {
+  display: block;
+  padding: 0;
+}
+
+.panel-section {
+  padding: var(--space-2) var(--space-3);
+  border-bottom: 1px solid var(--color-border);
+}
+
+.panel-section-label {
+  font-size: var(--text-xs);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--color-text-secondary);
+  margin-bottom: var(--space-1);
+}
+
+.current-task-text {
+  font-size: var(--text-sm);
+  line-height: 1.4;
+  color: var(--color-text-primary);
+  overflow-wrap: anywhere;
+}
+
+.current-task-caption {
+  margin-top: var(--space-1);
+  font-size: var(--text-xs);
+  font-style: italic;
+  color: var(--color-text-secondary);
+  opacity: 0.85;
+}
+
+/* =============================================================
+   Progress block — honest "how far along" (design §3.2):
+   state chip + step counter + live elapsed clock + an INDETERMINATE
+   activity bar (a moving sweep, never a fill-to-% bar), swapped for a
+   ✔/✘ outcome chip on exit. No percentage / ratio / ETA is ever rendered.
+   ============================================================= */
+.progress-status {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: var(--space-1) var(--space-2);
+  font-size: var(--text-xs);
+}
+
+.progress-state {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  font-weight: 600;
+  color: var(--color-text-primary);
+}
+
+.progress-state::before {
+  content: '';
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--color-text-dim);
+  flex-shrink: 0;
+}
+.progress-state.dispatching::before    { background: var(--color-dispatching); }
+.progress-state.working::before        {
+  background: var(--color-working);
+  animation: swatch-pulse 1.4s ease-in-out infinite;
+}
+.progress-state.exiting-done::before    { background: var(--color-exiting-done); }
+.progress-state.exiting-errored::before { background: var(--color-exiting-errored); }
+
+.progress-step {
+  color: var(--color-text-secondary);
+  font-family: var(--font-mono);
+}
+
+.progress-elapsed {
+  margin-left: auto;
+  color: var(--color-text-secondary);
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Indeterminate activity bar — a sweeping stripe inside a fixed track. The sweep
+   never represents a proportion; it just signals "alive". */
+.activity-bar {
+  position: relative;
+  height: 4px;
+  margin-top: var(--space-2);
+  border-radius: 999px;
+  background: var(--color-bg-surface);
+  overflow: hidden;
+}
+
+.activity-bar-sweep {
+  position: absolute;
+  top: 0;
+  left: 0;
+  height: 100%;
+  width: 40%;
+  border-radius: 999px;
+  background: linear-gradient(
+    90deg,
+    rgba(76, 175, 80, 0) 0%,
+    var(--color-working) 50%,
+    rgba(76, 175, 80, 0) 100%
+  );
+  animation: activity-indeterminate 1.3s var(--easing-standard) infinite;
+}
+
+/* Dispatching: slower, dimmer sweep tinted with the dispatch hue. */
+.activity-bar.dispatching .activity-bar-sweep {
+  background: linear-gradient(
+    90deg,
+    rgba(33, 150, 243, 0) 0%,
+    var(--color-dispatching) 50%,
+    rgba(33, 150, 243, 0) 100%
+  );
+  opacity: 0.7;
+  animation-duration: 2s;
+}
+
+@keyframes activity-indeterminate {
+  0%   { transform: translateX(-110%); }
+  100% { transform: translateX(360%); }
+}
+
+/* Terminal outcome chip — replaces the activity bar on exit. */
+.outcome-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin-top: var(--space-2);
+  padding: var(--space-1) var(--space-2);
+  border-radius: var(--radius-sm);
+  font-size: var(--text-xs);
+  font-weight: 600;
+}
+.outcome-chip .outcome-mark { font-size: var(--text-sm); line-height: 1; }
+.outcome-done {
+  background: rgba(0, 230, 118, 0.12);
+  border: 1px solid rgba(0, 230, 118, 0.40);
+  color: var(--color-exiting-done);
+}
+.outcome-errored {
+  background: rgba(244, 67, 54, 0.12);
+  border: 1px solid rgba(244, 67, 54, 0.40);
+  color: var(--color-exiting-errored);
+}
+
+/* =============================================================
+   Recent-activity mini step-log (design §3.3) — bounded, newest first.
+   ============================================================= */
+.recent-step-list {
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.recent-step-row {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  font-size: var(--text-xs);
+  color: var(--color-text-secondary);
+  overflow: hidden;
+}
+
+.recent-step-num {
+  flex-shrink: 0;
+  min-width: 1.25em;
+  text-align: right;
+  font-family: var(--font-mono);
+  color: var(--color-accent);
+  opacity: 0.85;
+}
+
+.recent-step-text {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono);
+  color: var(--color-text-primary);
+}
+
+.recent-empty {
+  font-size: var(--text-xs);
+  font-style: italic;
+  color: var(--color-text-secondary);
+  opacity: 0.85;
+}
+
+/* =============================================================
+   Utility
+   ============================================================= */
+.hidden { display: none !important; }
+
+/* Tooltip uses opacity/visibility fade instead of display:none.
+   Specificity 0,2,0 beats .hidden (0,1,0) even with !important. */
+.node-tooltip.hidden {
+  display: block !important;
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transform: translateY(6px);
+  /* Delay visibility so it stays accessible during fade-out */
+  transition: opacity    var(--motion-fast) var(--easing-accelerate),
+              transform  var(--motion-fast) var(--easing-accelerate),
+              visibility 0s var(--motion-fast);
+}
+
+.sr-only {
+  position: absolute;
+  width: 1px; height: 1px;
+  padding: 0; margin: -1px;
+  overflow: hidden;
+  clip: rect(0,0,0,0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* Focus indicator — visible for keyboard nav */
+:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 2px;
+}
+
+/* Scrollbar polish */
+* { scrollbar-width: thin; scrollbar-color: var(--color-border) transparent; }
+
+/* =============================================================
+   Reduced motion
+   ============================================================= */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.001ms !important;
+    transition-duration: 0.001ms !important;
+  }
+}

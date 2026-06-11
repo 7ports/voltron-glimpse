@@ -1,0 +1,77 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <title>Voltron Glimpse</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+
+  <!-- Status badges: WS connection + Docker availability -->
+  <div class="status-badges">
+    <div id="connection-badge" class="connection-badge disconnected" role="status" aria-live="polite">
+      <span class="connection-dot"></span>
+      <span class="connection-label">Connecting…</span>
+    </div>
+    <div id="docker-badge" class="connection-badge docker-unknown" role="status" aria-live="polite">
+      <span class="connection-dot"></span>
+      <span class="connection-label">Docker…</span>
+    </div>
+  </div>
+
+  <!-- Full-bleed graph stage -->
+  <div id="cy" aria-label="Agent graph"></div>
+
+  <!-- Graph toolbar (fit / zoom controls) -->
+  <div class="graph-toolbar" role="toolbar" aria-label="Graph controls">
+    <button id="btn-fit" class="toolbar-btn" title="Fit all nodes" aria-label="Fit graph">⊡</button>
+    <button id="btn-zoom-in" class="toolbar-btn" title="Zoom in" aria-label="Zoom in">＋</button>
+    <button id="btn-zoom-out" class="toolbar-btn" title="Zoom out" aria-label="Zoom out">－</button>
+  </div>
+
+  <!-- Reduced legend: live states + tier size + inferred-dispatch edge -->
+  <div class="legend" role="complementary" aria-label="Graph legend">
+    <div class="legend-section">
+      <div class="legend-title">Live state</div>
+      <div class="legend-row"><span class="legend-swatch status-dispatching"></span><span>Dispatching</span></div>
+      <div class="legend-row"><span class="legend-swatch status-working"></span><span>Working</span></div>
+      <div class="legend-row"><span class="legend-swatch status-exiting-done"></span><span>Exiting (ok)</span></div>
+      <div class="legend-row"><span class="legend-swatch status-exiting-errored"></span><span>Exiting (err)</span></div>
+    </div>
+    <div class="legend-section">
+      <div class="legend-title">Tier (size)</div>
+      <div class="legend-row"><span class="legend-node tier1-swatch"></span><span>Tier 1 (orchestrator)</span></div>
+      <div class="legend-row"><span class="legend-node tier2-swatch"></span><span>Tier 2 (specialist)</span></div>
+      <div class="legend-row"><span class="legend-node tier3-swatch"></span><span>Tier 3 (micro)</span></div>
+    </div>
+    <div class="legend-section">
+      <div class="legend-title">Edges</div>
+      <div class="legend-row"><span class="legend-edge edge-dashed"></span><span>Inferred dispatch</span></div>
+    </div>
+  </div>
+
+  <!-- Minimal node detail tooltip card — logic populated by app.js -->
+  <div id="node-tooltip" class="node-tooltip hidden" role="tooltip">
+    <div class="tooltip-header">
+      <span id="tooltip-agent" class="tooltip-agent"></span>
+      <button id="tooltip-close" class="tooltip-close" aria-label="Close detail">✕</button>
+    </div>
+    <div id="tooltip-meta" class="tooltip-meta">
+      <!-- agent, container name, dispatch time, current step, exit code -->
+    </div>
+  </div>
+
+  <!-- Cytoscape core only; concentric layout is built-in, no extra layout lib needed -->
+  <script src="vendor/cytoscape.min.js"></script>
+
+  <!-- Cytoscape stylesheet (exposes window.GLIMPSE_CYTO_STYLE) -->
+  <script src="cytoscape-style.js"></script>
+
+  <!-- App logic (WS client, graph init, patch handling) -->
+  <script src="app.js"></script>
+
+</body>
+</html>

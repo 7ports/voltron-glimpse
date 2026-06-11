@@ -1,0 +1,154 @@
+const test = require('node:test');
+const assert = require('node:assert');
+const http = require('http');
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
+const WebSocket = require('ws');
+
+const { createHttpServer } = require('../src/transport/httpServer');
+const { createWsServer } = require('../src/transport/wsServer');
+const { StateModel } = require('../src/state');
+const { createEventBus, EVENTS } = require('../src/eventBus');
+
+function listen(server) {
+  return new Promise((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(0, '127.0.0.1', () => resolve(server.address()));
+  });
+}
+
+function getPath(port, urlPath) {
+  return new Promise((resolve, reject) => {
+    const req = http.request(
+      {
+        host: '127.0.0.1',
+        port,
+        path: urlPath,
+        method: 'GET',
+        headers: { Connection: 'close' },
+        agent: false,
+      },
+      (res) => {
+        let body = '';
+        res.on('data', (c) => { body += c.toString(); });
+        res.on('end', () => resolve({ status: res.statusCode, body }));
+      }
+    );
+    req.on('error', reject);
+    req.end();
+  });
+}
+
+// Buffers all ws messages from the moment the WebSocket is created so that messages
+// arriving in the same tick as 'open' are not lost.
+function createCollector(ws) {
+  const buffer = [];
+  const waiters = [];
+  ws.on('message', (buf) => {
+    let msg;
+    try { msg = JSON.parse(buf.toString()); } catch (_e) { return; }
+    buffer.push(msg);
+    for (let i = waiters.length - 1; i >= 0; i--) {
+      const w = waiters[i];
+      if (w.predicate(msg)) {
+        waiters.splice(i, 1);
+        clearTimeout(w.timer);
+        w.resolve(msg);
+      }
+    }
+  });
+  return {
+    wait(predicate, timeoutMs = 2000) {
+      const existing = buffer.find(predicate);
+      if (existing) return Promise.resolve(existing);
+      return new Promise((resolve, reject) => {
+        const w = { predicate, resolve, timer: null };
+        w.timer = setTimeout(() => {
+          const idx = waiters.indexOf(w);
+          if (idx >= 0) waiters.splice(idx, 1);
+          reject(new Error('timeout waiting for ws message'));
+        }, timeoutMs);
+        waiters.push(w);
+      });
+    },
+  };
+}
+
+async function shutdownHttp(server) {
+  try { server.closeAllConnections(); } catch (_e) { /* older Node fallback */ }
+  await new Promise((r) => server.close(() => r()));
+}
+
+test('httpServer serves index.html from publicDir on GET / with 200', { timeout: 5000 }, async (t) => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'vg-transport-'));
+  fs.writeFileSync(path.join(tmp, 'index.html'), '<html><body>ok</body></html>');
+  const server = createHttpServer(tmp);
+  t.after(async () => {
+    await shutdownHttp(server);
+    fs.rmSync(tmp, { recursive: true, force: true });
+  });
+  const addr = await listen(server);
+  const res = await getPath(addr.port, '/');
+  assert.strictEqual(res.status, 200);
+  assert.ok(res.body.includes('ok'));
+});
+
+test('wsServer sends a snapshot on connect and broadcasts patches on bus events', { timeout: 5000 }, async (t) => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'vg-transport-ws-'));
+  fs.writeFileSync(path.join(tmp, 'index.html'), '<html></html>');
+  const server = createHttpServer(tmp);
+  const state = new StateModel();
+  state.applyEvent(EVENTS.AGENT_ENTER, { nodeId: 'a1', agent: 'planner', state: 'working' });
+  const bus = createEventBus();
+  const wsCtx = createWsServer(server, state, bus);
+  let ws;
+
+  t.after(async () => {
+    if (ws && ws.readyState !== WebSocket.CLOSED) {
+      await new Promise((r) => {
+        ws.once('close', () => r());
+        try { ws.terminate(); } catch (_e) { r(); }
+      });
+    }
+    await new Promise((r) => wsCtx.close(() => r()));
+    await shutdownHttp(server);
+    fs.rmSync(tmp, { recursive: true, force: true });
+  });
+
+  const addr = await listen(server);
+  ws = new WebSocket(`ws://127.0.0.1:${addr.port}`);
+  // Attach message collector BEFORE awaiting 'open' so a snapshot arriving in the
+  // same tick as 'open' is captured rather than dropped.
+  const collector = createCollector(ws);
+  await new Promise((resolve, reject) => {
+    ws.once('open', resolve);
+    ws.once('error', reject);
+  });
+
+  const snap = await collector.wait((m) => m.type === 'snapshot');
+  assert.ok(snap.state, 'snapshot should include state');
+  assert.ok(
+    snap.state.liveAgents && snap.state.liveAgents.a1,
+    'snapshot should contain pre-seeded live agent'
+  );
+
+  const patchPromise = collector.wait((m) => m.type === 'patch' && m.event === EVENTS.AGENT_ENTER);
+  bus.emit(EVENTS.AGENT_ENTER, { nodeId: 'a2', agent: 'fullstack', state: 'dispatching' });
+  const patch = await patchPromise;
+  assert.strictEqual(patch.event, EVENTS.AGENT_ENTER);
+  assert.deepStrictEqual(patch.payload, { nodeId: 'a2', agent: 'fullstack', state: 'dispatching' });
+});
+
+test('httpServer returns 404 for unknown paths', { timeout: 5000 }, async (t) => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'vg-transport-404-'));
+  fs.writeFileSync(path.join(tmp, 'index.html'), '<html></html>');
+  const server = createHttpServer(tmp);
+  t.after(async () => {
+    await shutdownHttp(server);
+    fs.rmSync(tmp, { recursive: true, force: true });
+  });
+  const addr = await listen(server);
+  const res = await getPath(addr.port, '/nope.html');
+  assert.strictEqual(res.status, 404);
+});

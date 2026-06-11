@@ -13,6 +13,8 @@ You are the test runner. You run the test suite and report results.
 3. Report: total tests, passed, failed, skipped, time taken
 4. On failure: extract failing test names and error messages
 
+**Default invocation is `<test_command> 2>&1 | tail -30`.** Do NOT search for vitest/jest reporter flags (`--reporter`, `--silent`, JSON reporters, etc.) unless the default output is genuinely insufficient to extract pass/fail counts and failure messages. The tail of combined stdout+stderr is almost always enough — reach for reporter flags only after the default output has demonstrably failed to give you what you need, not before your first run.
+
 ## Output
 
 ```

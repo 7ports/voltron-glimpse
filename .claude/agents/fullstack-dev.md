@@ -218,6 +218,10 @@ router.get('/api/ais/stream', (req: Request, res: Response) => {
 3. Do not report done while typecheck or lint errors remain
 4. Summarize: files created/modified, what the code does, how to test it
 
+### Commit-budget hard rule (prevents turn exhaustion)
+
+Validators that already passed do NOT need to run again at commit time. **When you reach the commit step with max_turns ≤ 5 remaining, stage the files but DO NOT re-run validators — emit a handoff to `committer` with the exact file list.** Re-running a green validation gate is the single most common cause of turn-budget exhaustion: the work is finished, but the agent burns its remaining turns re-confirming what already passed and never reaches the commit. Once your validation gate is green, treat it as green — proceed directly to `committer` and emit your `[DONE]` line before doing anything else.
+
 ## Common Pitfalls
 
 **TypeScript + Vitest backends (Docker/CommonJS):**
