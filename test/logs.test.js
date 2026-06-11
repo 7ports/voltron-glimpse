@@ -109,3 +109,34 @@ test('tailLog: reads only bytes after fromOffset', () => {
   const third = tailLog(filePath, size + 1000);
   assert.strictEqual(third.event, null);
 });
+
+test('parseLog: captures execTs from the [exec] line', () => {
+  const content = '[entry] t host=x\n[exec] 2026-01-01T00:00:01+00:00\n';
+  const p = parseLog(content, 'foo-2026-01-01T00-00-00.log');
+  assert.ok(p);
+  assert.strictEqual(p.execTs, '2026-01-01T00:00:01+00:00');
+});
+
+test('parseLog: [STEP 7] yields stepNum === 7', () => {
+  const p = parseLog('[STEP 7] doing x\n', 'foo-2026-01-01T00-00-00.log');
+  assert.ok(p);
+  assert.strictEqual(p.stepNum, 7);
+});
+
+test('parseLog: unnumbered [STEP] yields stepNum === null', () => {
+  const p = parseLog('[STEP] y\n', 'foo-2026-01-01T00-00-00.log');
+  assert.ok(p);
+  assert.strictEqual(p.stepNum, null);
+});
+
+test('parseLog: a chunk with two step lines returns both in order', () => {
+  const content = '[STEP 1] first\n[STEP 2] second\n';
+  const p = parseLog(content, 'foo-2026-01-01T00-00-00.log');
+  assert.ok(p);
+  assert.ok(Array.isArray(p.steps));
+  assert.strictEqual(p.steps.length, 2);
+  assert.strictEqual(p.steps[0].stepNum, 1);
+  assert.strictEqual(p.steps[0].text, '[STEP 1] first');
+  assert.strictEqual(p.steps[1].stepNum, 2);
+  assert.strictEqual(p.steps[1].text, '[STEP 2] second');
+});

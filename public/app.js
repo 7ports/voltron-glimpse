@@ -341,6 +341,16 @@
   var edges = [];        // [{ id, source, target, kind, inferred }]
   var dockerAvailable;   // boolean | undefined (unknown until first message)
   var hubState = null;   // hub payload from backend: { id, state:'active'|'idle', label, kind, … } or null
+  var pinnedNodeId = null; // nodeId of the click-pinned detail panel; null when closed
+
+  // Progress block — live elapsed-clock machinery (design §3.2). The interval is
+  // (re)bound on every panel render and cleared on close/re-pin so no timer leaks.
+  var elapsedTimer = null;        // setInterval handle for the 1 s elapsed clock
+  var panelElapsedEl = null;      // current elapsed <span>, re-acquired each render
+  var panelElapsedStartMs = null; // epoch ms the elapsed clock counts up from
+  var panelExitFrozenMs = null;   // frozen final elapsed (ms), captured once on exit
+  var exitedEntries = {};         // nodeId -> terminal snapshot, so a pinned panel can
+                                  // show the ✔/✘ chip after the live entry is dropped
 
   var cy = null;
   var layoutTimer = null;
@@ -443,11 +453,11 @@
           },
         });
       }
-      showTooltip(node);
+      pinPanel(node.id());
     });
-    // Tap empty canvas → dismiss tooltip.
+    // Tap empty canvas → dismiss the pinned panel.
     cy.on('tap', function (evt) {
-      if (evt.target === cy) hideTooltip();
+      if (evt.target === cy) closePanel();
     });
 
     // Hover affordance — class drives subtle halo in the stylesheet
@@ -943,45 +953,344 @@
   }
 
   /* ──────────────────────────────────────────────────────────────────────
-   * Node detail tooltip (minimal, lightweight)
+   * Node detail panel — click-to-pin, live-updating (§3, §5 of
+   * docs/agent-detail-panel-design.md). The panel binds to a nodeId and stays
+   * open across snapshot/patch updates until dismissed (Esc / ✕ / empty canvas).
    * ────────────────────────────────────────────────────────────────────── */
 
-  function showTooltip(node) {
-    if (!els.tooltip) return;
-    var id = node.id();
-    var entry = liveAgents[id];
+  // Human-readable state label — last-resort "current task" fallback when no
+  // journal dispatch text or step output exists (mirrors parsers/logs.js intent).
+  function stateLabel(state) {
+    if (state === 'working') return 'Agent running';
+    if (state === 'exiting:done' || state === 'exiting-done') return 'Completed';
+    if (state === 'exiting:errored' || state === 'exiting-errored') return 'Errored';
+    return 'Container started, awaiting first output';
+  }
+
+  // Strip the "Dispatched <agent> to " prefix the scrum-master journal writes,
+  // plus any wrapping quotes, leaving just the task description.
+  function stripDispatchPrefix(text) {
+    if (typeof text !== 'string') return '';
+    var t = text.trim().replace(/^Dispatched\s+\S+\s+to\s+/i, '');
+    return t.replace(/^["'"']+|["'"']+$/g, '').trim();
+  }
+
+  // Resolve the §3.1 current-task precedence chain. Returns { text, source }
+  // where source ∈ 'dispatch' | 'done' | 'step' | 'state'. Only 'dispatch' is an
+  // inferred (journal-correlated) source, so only it gets the honesty caption.
+  function resolveCurrentTask(entry) {
+    if (entry && typeof entry.dispatchTaskText === 'string' && entry.dispatchTaskText.trim()) {
+      var stripped = stripDispatchPrefix(entry.dispatchTaskText);
+      if (stripped) return { text: stripped, source: 'dispatch' };
+    }
+    if (entry && typeof entry.doneSummary === 'string' && entry.doneSummary.trim()) {
+      return { text: entry.doneSummary.trim(), source: 'done' };
+    }
+    if (entry && typeof entry.step === 'string' && entry.step.trim()) {
+      return { text: entry.step.trim(), source: 'step' };
+    }
+    return { text: stateLabel(entry && entry.state), source: 'state' };
+  }
+
+  // Build the "Current task" section: label + task text + optional honesty caption.
+  function buildCurrentTaskSection(entry) {
+    var section = document.createElement('div');
+    section.className = 'panel-section current-task-section';
+
+    var label = document.createElement('div');
+    label.className = 'panel-section-label';
+    label.textContent = 'Current task';
+    section.appendChild(label);
+
+    var task = resolveCurrentTask(entry);
+    var body = document.createElement('div');
+    body.className = 'current-task-text';
+    body.textContent = task.text;
+    section.appendChild(body);
+
+    if (task.source === 'dispatch') {
+      var caption = document.createElement('div');
+      caption.className = 'current-task-caption';
+      caption.textContent = 'inferred from journal';
+      section.appendChild(caption);
+    }
+    return section;
+  }
+
+  // Parse a backend timestamp (execTs / createdAt) to epoch ms. Accepts a numeric
+  // ms value, an all-digits string, or any Date-parseable string; null if unusable.
+  function toEpochMs(ts) {
+    if (ts == null) return null;
+    if (typeof ts === 'number') return isFinite(ts) ? ts : null;
+    if (typeof ts === 'string') {
+      var s = ts.trim();
+      if (s === '') return null;
+      if (/^\d+$/.test(s)) { var n = Number(s); return isFinite(n) ? n : null; }
+      var parsed = Date.parse(s);
+      return isFinite(parsed) ? parsed : null;
+    }
+    return null;
+  }
+
+  // mm:ss from a millisecond duration (negative clamps to 0). Minutes are not capped
+  // at 99 — a long run simply keeps counting. This is a duration, never a ratio.
+  function formatElapsed(ms) {
+    if (typeof ms !== 'number' || !isFinite(ms) || ms < 0) ms = 0;
+    var totalSec = Math.floor(ms / 1000);
+    var mins = Math.floor(totalSec / 60);
+    var secs = totalSec - mins * 60;
+    var mm = mins < 10 ? '0' + mins : String(mins);
+    var ss = secs < 10 ? '0' + secs : String(secs);
+    return mm + ':' + ss;
+  }
+
+  // Step counter text (design §3.2): "Step 7" from the agent's own [STEP N];
+  // else "N steps" from a raw count of unnumbered steps; else '' so the caller
+  // OMITS it entirely (never "step 0").
+  function stepCounterText(entry) {
+    if (entry && typeof entry.stepNum === 'number' && entry.stepNum > 0) {
+      return 'Step ' + entry.stepNum;
+    }
+    if (entry && typeof entry.stepCount === 'number' && entry.stepCount > 0) {
+      return entry.stepCount === 1 ? '1 step' : entry.stepCount + ' steps';
+    }
+    return '';
+  }
+
+  // True for the two terminal states (colon or hyphen form).
+  function isTerminalState(state) {
+    return state === 'exiting:done' || state === 'exiting-done' ||
+           state === 'exiting:errored' || state === 'exiting-errored';
+  }
+
+  // Build the "how far along" progress block (design §3.2): a status line (state +
+  // step counter + live elapsed clock) over an INDETERMINATE activity bar while the
+  // agent runs, replaced by a ✔/✘ outcome chip on exit. HONESTY (the no-fake-% rule):
+  // it renders no percentage, ratio, N/M, or ETA — no honest total exists, so none
+  // is shown; "progress" is activity + position + elapsed, never completion.
+  function buildProgressSection(entry) {
+    var section = document.createElement('div');
+    section.className = 'panel-section progress-section';
+
+    var terminal = isTerminalState(entry.state);
+    var isError = (entry.state === 'exiting:errored' || entry.state === 'exiting-errored');
+
+    // -- Status line: state chip + step counter + elapsed clock --
+    var statusLine = document.createElement('div');
+    statusLine.className = 'progress-status';
+    statusLine.setAttribute('role', 'status');
+    statusLine.setAttribute('aria-live', 'polite');
+
+    var stateChip = document.createElement('span');
+    stateChip.className = 'progress-state ' + stateClass(entry.state);
+    stateChip.textContent = stateLabel(entry.state);
+    statusLine.appendChild(stateChip);
+
+    var stepText = stepCounterText(entry);
+    if (stepText) {
+      var stepEl = document.createElement('span');
+      stepEl.className = 'progress-step';
+      stepEl.textContent = stepText;
+      statusLine.appendChild(stepEl);
+    }
+
+    // Live elapsed clock since [exec], falling back to container createdAt.
+    var startMs = toEpochMs(entry.execTs);
+    if (startMs == null) startMs = toEpochMs(entry.createdAt);
+    if (startMs != null) {
+      var clockEl = document.createElement('span');
+      clockEl.className = 'progress-elapsed';
+      var shownMs = (terminal && panelExitFrozenMs != null)
+        ? panelExitFrozenMs
+        : (Date.now() - startMs);
+      clockEl.textContent = formatElapsed(shownMs);
+      statusLine.appendChild(clockEl);
+      panelElapsedEl = clockEl;          // ticked by setupElapsedClock()
+      panelElapsedStartMs = startMs;
+    } else {
+      panelElapsedEl = null;
+      panelElapsedStartMs = null;
+    }
+    section.appendChild(statusLine);
+
+    // -- Activity indicator: indeterminate sweep, or terminal outcome chip --
+    if (terminal) {
+      var chip = document.createElement('div');
+      chip.className = 'outcome-chip ' + (isError ? 'outcome-errored' : 'outcome-done');
+      var mark = document.createElement('span');
+      mark.className = 'outcome-mark';
+      mark.textContent = isError ? '✘' : '✔';
+      chip.appendChild(mark);
+      var chipText = document.createElement('span');
+      chipText.className = 'outcome-text';
+      var code = (typeof entry.exitCode === 'number') ? ' (exit ' + entry.exitCode + ')' : '';
+      chipText.textContent = (isError ? 'errored' : 'completed') + code;
+      chip.appendChild(chipText);
+      section.appendChild(chip);
+    } else {
+      var bar = document.createElement('div');
+      bar.className = 'activity-bar' + (entry.state === 'dispatching' ? ' dispatching' : '');
+      bar.setAttribute('aria-hidden', 'true'); // decorative; status line carries the signal
+      var sweep = document.createElement('div');
+      sweep.className = 'activity-bar-sweep';
+      bar.appendChild(sweep);
+      section.appendChild(bar);
+    }
+
+    return section;
+  }
+
+  // Build the "Recent activity" mini step-log (design §3.3): up to 5 recentSteps,
+  // newest first, each truncated to one line with the full text on hover. Agents
+  // that emit no steps show an honest empty-state caption (true for many).
+  function buildRecentActivitySection(entry) {
+    var section = document.createElement('div');
+    section.className = 'panel-section recent-activity-section';
+
+    var label = document.createElement('div');
+    label.className = 'panel-section-label';
+    label.textContent = 'Recent activity';
+    section.appendChild(label);
+
+    var steps = (entry && Array.isArray(entry.recentSteps)) ? entry.recentSteps : [];
+    if (steps.length === 0) {
+      var empty = document.createElement('div');
+      empty.className = 'recent-empty';
+      empty.textContent = 'This agent reports no step output.';
+      section.appendChild(empty);
+      return section;
+    }
+
+    var list = document.createElement('ul');
+    list.className = 'recent-step-list';
+    steps.slice(0, 5).forEach(function (s) {
+      var text = (s && typeof s.text === 'string') ? s.text
+               : (typeof s === 'string' ? s : '');
+      var num = (s && typeof s.stepNum === 'number') ? s.stepNum : null;
+
+      var li = document.createElement('li');
+      li.className = 'recent-step-row';
+      li.title = (num != null ? num + ' ' : '') + text; // full text on hover
+
+      if (num != null) {
+        var numEl = document.createElement('span');
+        numEl.className = 'recent-step-num';
+        numEl.textContent = String(num);
+        li.appendChild(numEl);
+      }
+      var textEl = document.createElement('span');
+      textEl.className = 'recent-step-text';
+      textEl.textContent = text;
+      li.appendChild(textEl);
+
+      list.appendChild(li);
+    });
+    section.appendChild(list);
+    return section;
+  }
+
+  // Clear the live elapsed-clock interval (idempotent; called before every re-bind
+  // and on panel dismiss so no timer ever leaks).
+  function clearElapsedClock() {
+    if (elapsedTimer !== null) { clearInterval(elapsedTimer); elapsedTimer = null; }
+  }
+
+  // (Re)bind the 1 s elapsed-clock interval to the freshly-rendered panel. For a
+  // terminal agent it freezes the value (capturing the final elapsed once) and
+  // starts no interval; for a live agent it ticks mm:ss every second.
+  function setupElapsedClock(entry) {
+    clearElapsedClock();
+    if (!entry || panelElapsedEl == null || panelElapsedStartMs == null) return;
+    if (isTerminalState(entry.state)) {
+      if (panelExitFrozenMs == null) panelExitFrozenMs = Date.now() - panelElapsedStartMs;
+      panelElapsedEl.textContent = formatElapsed(panelExitFrozenMs);
+      return;
+    }
+    elapsedTimer = setInterval(function () {
+      if (panelElapsedEl == null || panelElapsedStartMs == null) { clearElapsedClock(); return; }
+      panelElapsedEl.textContent = formatElapsed(Date.now() - panelElapsedStartMs);
+    }, 1000);
+  }
+
+  // Append a key/value pair directly into a 2-column .tooltip-meta grid.
+  function appendMetaRow(grid, key, value) {
+    if (value == null || value === '') return;
+    var k = document.createElement('span');
+    k.className = 'tooltip-key';
+    k.textContent = key;
+    var v = document.createElement('span');
+    v.className = 'tooltip-val';
+    v.textContent = String(value);
+    grid.appendChild(k);
+    grid.appendChild(v);
+  }
+
+  // Build the agent meta grid (container / dispatch time / step / state / exit).
+  function buildAgentMeta(entry) {
+    var grid = document.createElement('div');
+    grid.className = 'tooltip-meta';
+    appendMetaRow(grid, 'Container', entry.containerName);
+    appendMetaRow(grid, 'Dispatched', entry.createdAt);
+    appendMetaRow(grid, 'Step', entry.step);
+    appendMetaRow(grid, 'State', entry.state);
+    if (entry.state === 'exiting:done' || entry.state === 'exiting:errored' ||
+        typeof entry.exitCode === 'number') {
+      appendMetaRow(grid, 'Exit code',
+        (typeof entry.exitCode === 'number') ? String(entry.exitCode) : '—');
+    }
+    return grid;
+  }
+
+  // Build the hub (orchestrator) meta grid — same content as the prior card.
+  function buildHubMeta(node) {
+    var grid = document.createElement('div');
+    grid.className = 'tooltip-meta';
+    appendMetaRow(grid, 'Role', 'orchestrator (host session, inferred)');
+    var hubPodKey = node.data('podKey');
+    if (hubPodKey && podRegistry[hubPodKey]) {
+      var hreg = podRegistry[hubPodKey];
+      appendMetaRow(grid, 'Pod', hreg.label + (hreg.isSelf ? ' (you)' : ''));
+    }
+    if (hubState && (!multiPodMode || !hubPodKey || hubPodKey === selfPodId)) {
+      appendMetaRow(grid, 'Status', hubState.state || '—');
+      if (hubState.label) appendMetaRow(grid, 'Activity', truncate(hubState.label, 80));
+      if (hubState.kind) appendMetaRow(grid, 'Kind', hubState.kind);
+    }
+    return grid;
+  }
+
+  // Render (or re-render) the detail card for a nodeId. Safe to call repeatedly —
+  // it rebuilds the body from current state. If the node is gone (post-linger) or
+  // the agent entry has been dropped, it leaves the last render intact rather than
+  // blanking the card (terminal-state handling is a later build step).
+  function renderPanel(nodeId) {
+    if (!els.tooltip || !nodeId) return;
+    var node = cy && cy.getElementById(nodeId);
+    if (!node || node.empty()) return;
+    var entry = liveAgents[nodeId] || exitedEntries[nodeId];
+    var isHub = (nodeId === HUB_ID || nodeId.indexOf(HUB_ID + '@') === 0);
+    if (!entry && !isHub) return;
 
     if (els.tooltipAgent) {
-      els.tooltipAgent.textContent = (entry && entry.agent) || id;
+      els.tooltipAgent.textContent = (entry && entry.agent) || (isHub ? HUB_ID : nodeId);
     }
+
     if (els.tooltipMeta) {
-      els.tooltipMeta.textContent = '';
+      els.tooltipMeta.innerHTML = '';
       if (entry) {
-        addMetaRow('Container', entry.containerName);
-        addMetaRow('Dispatched', entry.createdAt);
-        addMetaRow('Step', entry.step);
-        addMetaRow('State', entry.state);
-        if (entry.state === 'exiting:done' || entry.state === 'exiting:errored' ||
-            typeof entry.exitCode === 'number') {
-          addMetaRow('Exit code',
-            (typeof entry.exitCode === 'number') ? String(entry.exitCode) : '—');
-        }
-      } else if (id === HUB_ID || id.indexOf(HUB_ID + '@') === 0) {
-        addMetaRow('Role', 'orchestrator (host session, inferred)');
-        var hubPodKey = node.data('podKey');
-        if (hubPodKey && podRegistry[hubPodKey]) {
-          var hreg = podRegistry[hubPodKey];
-          addMetaRow('Pod', hreg.label + (hreg.isSelf ? ' (you)' : ''));
-        }
-        if (hubState && (!multiPodMode || !hubPodKey || hubPodKey === selfPodId)) {
-          addMetaRow('Status', hubState.state || '—');
-          if (hubState.label) addMetaRow('Activity', truncate(hubState.label, 80));
-          if (hubState.kind) addMetaRow('Kind', hubState.kind);
-        }
+        els.tooltipMeta.appendChild(buildCurrentTaskSection(entry));
+        els.tooltipMeta.appendChild(buildProgressSection(entry));
+        els.tooltipMeta.appendChild(buildRecentActivitySection(entry));
+        els.tooltipMeta.appendChild(buildAgentMeta(entry));
+        setupElapsedClock(entry);
+      } else if (isHub) {
+        clearElapsedClock();
+        panelElapsedEl = null;
+        els.tooltipMeta.appendChild(buildHubMeta(node));
       }
     }
 
-    // Position near the tapped node within the full-bleed canvas.
+    // Position near the pinned node within the full-bleed canvas.
     var pos = node.renderedPosition();
     if (pos) {
       els.tooltip.style.left = Math.round(pos.x + 16) + 'px';
@@ -990,22 +1299,25 @@
     els.tooltip.classList.remove('hidden');
   }
 
-  function addMetaRow(key, value) {
-    if (value == null || value === '') return;
-    var row = document.createElement('div');
-    row.className = 'tooltip-row';
-    var k = document.createElement('span');
-    k.className = 'tooltip-key';
-    k.textContent = key;
-    var v = document.createElement('span');
-    v.className = 'tooltip-val';
-    v.textContent = String(value);
-    row.appendChild(k);
-    row.appendChild(v);
-    els.tooltipMeta.appendChild(row);
+  // Pin the panel to a node (click). It stays open and live-updates until dismissed.
+  function pinPanel(nodeId) {
+    pinnedNodeId = nodeId;
+    panelExitFrozenMs = null; // fresh pin target — recompute the freeze on its own exit
+    exitedEntries = {};       // drop any retained terminal snapshot from a prior pin
+    renderPanel(nodeId);
   }
 
-  function hideTooltip() {
+  // Re-render the pinned panel only if the changed nodeId is the one on screen.
+  function refreshPinnedPanel(nodeId) {
+    if (pinnedNodeId && pinnedNodeId === nodeId) renderPanel(pinnedNodeId);
+  }
+
+  // Dismiss the panel and clear the pin.
+  function closePanel() {
+    pinnedNodeId = null;
+    clearElapsedClock();      // no leaked elapsed-clock interval after dismiss
+    panelExitFrozenMs = null;
+    exitedEntries = {};
     if (els.tooltip) els.tooltip.classList.add('hidden');
   }
 
@@ -1089,7 +1401,6 @@
     podRegistry = {}; // full reset — snapshot is authoritative
     multiPodMode = false;
     if (cy) cy.elements().remove();
-    hideTooltip();
 
     dockerAvailable = (typeof state.dockerAvailable === 'boolean')
       ? state.dockerAvailable : undefined;
@@ -1144,6 +1455,13 @@
     if (layoutTimer) { clearTimeout(layoutTimer); layoutTimer = null; }
     updatePodLegend();
     runLayout();
+
+    // Re-render a still-pinned panel against the fresh snapshot; close it if its
+    // node no longer exists in the new authoritative state.
+    if (pinnedNodeId) {
+      if (cy && cy.getElementById(pinnedNodeId).nonempty()) renderPanel(pinnedNodeId);
+      else closePanel();
+    }
   }
 
   function onAgentEnter(p) {
@@ -1167,14 +1485,26 @@
     if (!existing) return; // updates for unknown nodes are ignored (matches state.js)
     liveAgents[p.nodeId] = Object.assign({}, existing, p);
     upsertNode(liveAgents[p.nodeId]); // refresh state class + live step label, no relayout
+    refreshPinnedPanel(p.nodeId); // live-update the panel if this node is pinned open
   }
 
   function onAgentExit(p) {
     if (!p || !p.nodeId) return;
     var exitCode = (p && typeof p.exitCode === 'number') ? p.exitCode : undefined;
+    // Retain a terminal snapshot for a pinned panel so it can show the ✔/✘ chip and a
+    // frozen clock after the live entry is dropped (design §5 — no auto-close on exit).
+    if (pinnedNodeId === p.nodeId) {
+      var prev = liveAgents[p.nodeId] || {};
+      var terminalState = (exitCode != null && exitCode !== 0) ? 'exiting:errored' : 'exiting:done';
+      exitedEntries[p.nodeId] = Object.assign({}, prev, p, {
+        state: (typeof p.state === 'string' ? p.state : terminalState),
+        exitCode: exitCode,
+      });
+    }
     delete liveAgents[p.nodeId]; // remove from live set immediately
     updatePodLegend(); // pod may have no more live agents
     animateNodeExit(p.nodeId, exitCode); // §4.4 — node removal is deferred ~2.5 s
+    refreshPinnedPanel(p.nodeId); // swap to terminal chip + freeze clock if pinned
     // scheduleLayout() is called inside animateNodeExit after the linger window
   }
 
@@ -1222,6 +1552,9 @@
     if (wasAbsent) {
       animateNodeEntrance(ele);
       scheduleLayout();
+    }
+    if (pinnedNodeId && (pinnedNodeId === HUB_ID || pinnedNodeId.indexOf(HUB_ID + '@') === 0)) {
+      renderPanel(pinnedNodeId); // keep a pinned hub panel live as its label/state changes
     }
   }
 
@@ -1313,9 +1646,9 @@
   }
 
   function wireTooltip() {
-    if (els.tooltipClose) els.tooltipClose.addEventListener('click', hideTooltip);
+    if (els.tooltipClose) els.tooltipClose.addEventListener('click', closePanel);
     document.addEventListener('keydown', function (e) {
-      if (e.key === 'Escape') hideTooltip();
+      if (e.key === 'Escape') closePanel();
     });
   }
 

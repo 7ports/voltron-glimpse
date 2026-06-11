@@ -358,3 +358,95 @@ test('hub vanishes when the last live agent exits while the journal is already i
   assert.strictEqual(r.snapshot().liveAgents.length, 0);
   assert.strictEqual(r.snapshot().hub, null);
 });
+
+// --- Agent detail panel retention (build-steps 2 & 3) ---------------------
+
+test('applyLogEvent retains execTs once + stepCount + newest-first recentSteps, with NO fs write', () => {
+  const fs = require('node:fs');
+  const guarded = [
+    'writeFile', 'writeFileSync', 'appendFile', 'appendFileSync',
+    'mkdir', 'mkdirSync', 'rm', 'rmSync', 'unlink', 'unlinkSync',
+  ];
+  const origs = {};
+  let writes = 0;
+  for (const fn of guarded) {
+    origs[fn] = fs[fn];
+    fs[fn] = (...args) => {
+      writes += 1;
+      return undefined;
+    };
+  }
+
+  try {
+    const timer = makeFakeTimer();
+    const bus = createEventBus();
+    const r = createReconciler({ bus, timer });
+
+    r.applyDockerPoll({ available: true, containers: [A] });
+
+    // [exec] sets execTs once
+    r.applyLogEvent({
+      nodeId: 'A', state: 'working', exitCode: null, latestStep: null,
+      execTs: '2026-06-09T10:00:01+00:00', steps: [],
+    });
+    // three numbered steps (later execTs values must be ignored)
+    r.applyLogEvent({
+      nodeId: 'A', state: 'working', exitCode: null, latestStep: '[STEP 1] a',
+      stepNum: 1, execTs: 'IGNORED', steps: [{ stepNum: 1, text: '[STEP 1] a' }],
+    });
+    r.applyLogEvent({
+      nodeId: 'A', state: 'working', exitCode: null, latestStep: '[STEP 2] b',
+      stepNum: 2, steps: [{ stepNum: 2, text: '[STEP 2] b' }],
+    });
+    r.applyLogEvent({
+      nodeId: 'A', state: 'working', exitCode: null, latestStep: '[STEP 3] c',
+      stepNum: 3, steps: [{ stepNum: 3, text: '[STEP 3] c' }],
+    });
+
+    const snap = r.snapshot();
+    const a = snap.liveAgents.find((e) => e.nodeId === 'A');
+    assert.ok(a);
+    assert.strictEqual(a.stepCount, 3);
+    assert.strictEqual(a.recentSteps.length, 3);
+    // newest-first
+    assert.strictEqual(a.recentSteps[0].stepNum, 3);
+    assert.strictEqual(a.recentSteps[2].stepNum, 1);
+    // execTs set once, not overwritten
+    assert.strictEqual(a.execTs, '2026-06-09T10:00:01+00:00');
+    assert.strictEqual(a.stepNum, 3);
+  } finally {
+    for (const fn of guarded) fs[fn] = origs[fn];
+  }
+
+  assert.strictEqual(writes, 0, 'reconciler must perform no fs writes');
+});
+
+test('a dispatch journal signal with task text, then a matching enter, carries dispatchTaskText', () => {
+  const timer = makeFakeTimer();
+  const bus = createEventBus();
+  const r = createReconciler({ bus, timer, dispatchWindowMs: 10000 });
+
+  r.applyJournalEvent(
+    makeJournal({ kind: 'dispatch', text: 'Dispatched A (B1) to implement the WS handler' })
+  );
+  timer.advance(2000); // inside the correlation window
+  r.applyDockerPoll({ available: true, containers: [A] });
+
+  const a = r.snapshot().liveAgents.find((e) => e.nodeId === 'A');
+  assert.ok(a);
+  assert.strictEqual(a.dispatchTaskText, 'implement the WS handler');
+});
+
+test('a non-matching enter leaves dispatchTaskText null (best-effort, never wrong)', () => {
+  const timer = makeFakeTimer();
+  const bus = createEventBus();
+  const r = createReconciler({ bus, timer, dispatchWindowMs: 10000 });
+
+  r.applyJournalEvent(makeJournal({ kind: 'dispatch', text: 'Dispatched A to do X' }));
+  timer.advance(2000);
+  r.applyDockerPoll({ available: true, containers: [B] }); // B enters, not A
+
+  const b = r.snapshot().liveAgents.find((e) => e.nodeId === 'B');
+  assert.ok(b);
+  assert.strictEqual(b.dispatchTaskText, null);
+});

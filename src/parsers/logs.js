@@ -38,7 +38,11 @@ function defaultLabel(state, exitCode) {
 // Parse a full log file's content into ONE consolidated live-state payload
 // for the reconciler (src/liveness.js applyLogEvent). Returns null when the
 // filename is unusable. Shape: { nodeId, agent, state, exitCode, latestStep,
-// containerName }. `state` is null when no recognizable lifecycle line is seen.
+// stepNum, execTs, steps, containerName }. `state` is null when no recognizable
+// lifecycle line is seen. `execTs` is the `[exec] <ts>` token (null if absent);
+// `stepNum` is the integer N of the LATEST `[STEP N]` (null for an unnumbered
+// `[STEP]` or no step); `steps` is EVERY step/done line found in this chunk, in
+// order, as { stepNum, text } — so a multi-step tail chunk loses none of them.
 function parseLog(content, filename) {
   if (typeof content !== 'string' || typeof filename !== 'string') {
     return null;
@@ -53,6 +57,9 @@ function parseLog(content, filename) {
   let state = null;
   let exitCode = null;
   let latestStep = null;
+  let execTs = null;
+  let stepNum = null;
+  const steps = [];
 
   for (const line of lines) {
     if (!line || line.charCodeAt(0) !== 91) continue;
@@ -62,20 +69,28 @@ function parseLog(content, filename) {
       if (state === null) state = 'dispatching';
     } else if ((m = RE_EXEC.exec(line))) {
       state = 'working';
+      if (execTs === null && m[1]) execTs = m[1];
     } else if ((m = RE_EXIT.exec(line))) {
       exitCode = parseInt(m[2], 10);
       state = exitCode === 0 ? 'done' : 'errored';
     } else if ((m = RE_STEP.exec(line))) {
       const num = m[1];
       const text = (m[2] || '').trim();
+      let label;
       if (num) {
-        latestStep = text ? `[STEP ${num}] ${text}` : `[STEP ${num}]`;
+        stepNum = parseInt(num, 10);
+        label = text ? `[STEP ${num}] ${text}` : `[STEP ${num}]`;
       } else {
-        latestStep = text ? `[STEP] ${text}` : '[STEP]';
+        stepNum = null;
+        label = text ? `[STEP] ${text}` : '[STEP]';
       }
+      latestStep = label;
+      steps.push({ stepNum: num ? parseInt(num, 10) : null, text: label });
     } else if ((m = RE_DONE.exec(line))) {
       const summary = (m[1] || '').trim();
-      latestStep = summary ? `[DONE] ${summary}` : '[DONE]';
+      const label = summary ? `[DONE] ${summary}` : '[DONE]';
+      latestStep = label;
+      steps.push({ stepNum: null, text: label });
     }
   }
 
@@ -83,7 +98,7 @@ function parseLog(content, filename) {
     latestStep = defaultLabel(state, exitCode);
   }
 
-  return { nodeId, agent, state, exitCode, latestStep, containerName };
+  return { nodeId, agent, state, exitCode, latestStep, stepNum, execTs, steps, containerName };
 }
 
 // Read only the bytes appended since `fromOffset`, parse them, and return the

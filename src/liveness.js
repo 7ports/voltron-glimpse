@@ -3,6 +3,21 @@ const { buildLiveEdges, HUB_ID } = require('./model/edges');
 
 const STEP_RE = /^\[(STEP|DONE)\b/;
 
+// Recent-activity ring buffer size per live agent (newest-first). §3.3.
+const RECENT_STEPS_MAX = 5;
+
+// Best-effort: turn a journal dispatch line ("Dispatched `agent` (B1) to <task>")
+// into just the task prose. Falls back to the full trimmed text when there is no
+// recognizable " to " tail — honest, never wrong.
+function stripDispatchPrefix(text) {
+  if (typeof text !== 'string') return null;
+  const t = text.trim();
+  if (!t) return null;
+  const m = /^dispatch(?:ed|ing)?\b.*?\bto\s+(.+)$/i.exec(t);
+  if (m && m[1] && m[1].trim()) return m[1].trim();
+  return t;
+}
+
 // §3.5 dispatch correlation: scan a `dispatch` journal line's free text for the
 // DISPATCHED agent slug (the actor is always scrum-master; the target is named
 // in the prose, e.g. "Dispatched `fullstack-dev` (B1) to …"). Best-effort: a
@@ -121,6 +136,12 @@ function createReconciler({
       state: e.state,
       step: e.step,
       exitCode: e.exitCode,
+      execTs: e.execTs != null ? e.execTs : null,
+      stepNum: e.stepNum != null ? e.stepNum : null,
+      stepCount: e.stepCount || 0,
+      recentSteps: Array.isArray(e.recentSteps) ? e.recentSteps.slice() : [],
+      dispatchTaskText: e.dispatchTaskText != null ? e.dispatchTaskText : null,
+      doneSummary: e.doneSummary != null ? e.doneSummary : null,
     };
   }
 
@@ -163,6 +184,12 @@ function createReconciler({
       nodeId,
       state: entry.state,
       step: entry.step != null ? entry.step : null,
+      stepNum: entry.stepNum != null ? entry.stepNum : null,
+      stepCount: entry.stepCount || 0,
+      execTs: entry.execTs != null ? entry.execTs : null,
+      recentSteps: Array.isArray(entry.recentSteps) ? entry.recentSteps.slice() : [],
+      dispatchTaskText: entry.dispatchTaskText != null ? entry.dispatchTaskText : null,
+      doneSummary: entry.doneSummary != null ? entry.doneSummary : null,
       exitCode,
     });
     const linger = errored ? erroredLingerMs : lingerMs;
@@ -192,7 +219,7 @@ function createReconciler({
       const nodeId = c.nodeId;
       seen.add(nodeId);
       if (!liveAgents.has(nodeId)) {
-        liveAgents.set(nodeId, {
+        const entry = {
           nodeId,
           agent: c.agent,
           containerName: c.name,
@@ -205,7 +232,14 @@ function createReconciler({
           exitScheduled: false,
           exitTimer: null,
           exitCode: null,
-        });
+          execTs: null,
+          stepNum: null,
+          stepCount: 0,
+          recentSteps: [],
+          dispatchTaskText: null,
+          doneSummary: null,
+        };
+        liveAgents.set(nodeId, entry);
         membershipChanged = true;
         const enterPayload = {
           nodeId,
@@ -218,11 +252,18 @@ function createReconciler({
           state: 'dispatching',
         };
         // §3.5: correlate a recent dispatch to this fresh container; flash once
-        // and consume the pending entry so it can never flash twice.
+        // and consume the pending entry so it can never flash twice. Best-effort:
+        // also carry the dispatch line's task prose onto the entry + enter payload.
         const matchIdx = pendingDispatches.findIndex((pd) => containerMatches(pd.agent, c));
         if (matchIdx !== -1) {
+          const pd = pendingDispatches[matchIdx];
           pendingDispatches.splice(matchIdx, 1);
           enterPayload.dispatchFlash = true;
+          if (pd && typeof pd.text === 'string' && pd.text.trim()) {
+            const taskText = stripDispatchPrefix(pd.text);
+            entry.dispatchTaskText = taskText;
+            enterPayload.dispatchTaskText = taskText;
+          }
         }
         bus.emit(EVENTS.AGENT_ENTER, enterPayload);
       }
@@ -268,10 +309,53 @@ function createReconciler({
     if (parsed.state === 'working' || hasStep) {
       entry.state = 'working';
       entry.step = hasStep ? parsed.latestStep : null;
+
+      // execTs is set ONCE (first [exec] seen) and never overwritten.
+      if (entry.execTs == null && parsed.execTs != null) {
+        entry.execTs = parsed.execTs;
+      }
+
+      // Prefer the full per-chunk steps[] (lossless); fall back to the single
+      // latestStep when an older single-event payload arrives without steps[].
+      let chunkSteps = Array.isArray(parsed.steps) ? parsed.steps : null;
+      if (!chunkSteps || chunkSteps.length === 0) {
+        chunkSteps = hasStep
+          ? [{ stepNum: parsed.stepNum != null ? parsed.stepNum : null, text: parsed.latestStep }]
+          : [];
+      }
+
+      if (chunkSteps.length > 0) {
+        if (!Array.isArray(entry.recentSteps)) entry.recentSteps = [];
+        for (const s of chunkSteps) {
+          entry.stepCount = (entry.stepCount || 0) + 1;
+          if (s && s.stepNum != null) entry.stepNum = s.stepNum;
+          entry.recentSteps.unshift({
+            stepNum: s && s.stepNum != null ? s.stepNum : null,
+            text: s ? s.text : null,
+          });
+          if (entry.recentSteps.length > RECENT_STEPS_MAX) {
+            entry.recentSteps.length = RECENT_STEPS_MAX;
+          }
+        }
+      } else if (parsed.stepNum != null) {
+        entry.stepNum = parsed.stepNum;
+      }
+
+      // Surface a [DONE] summary as its own field for the panel fallback chain.
+      if (hasStep && parsed.latestStep.indexOf('[DONE]') === 0) {
+        const summary = parsed.latestStep.slice('[DONE]'.length).trim();
+        entry.doneSummary = summary || null;
+      }
+
       bus.emit(EVENTS.AGENT_UPDATE, {
         nodeId,
         state: 'working',
         step: entry.step,
+        stepNum: entry.stepNum != null ? entry.stepNum : null,
+        stepCount: entry.stepCount || 0,
+        execTs: entry.execTs != null ? entry.execTs : null,
+        recentSteps: entry.recentSteps.slice(),
+        doneSummary: entry.doneSummary != null ? entry.doneSummary : null,
       });
     }
   }
@@ -367,7 +451,12 @@ function createReconciler({
     if (signal.kind === 'dispatch') {
       prunePending(lastJournalTs);
       const target = extractDispatchTarget(signal);
-      if (target) pendingDispatches.push({ agent: target, ts: lastJournalTs });
+      if (target)
+        pendingDispatches.push({
+          agent: target,
+          ts: lastJournalTs,
+          text: typeof signal.text === 'string' ? signal.text : null,
+        });
     }
     hubState = 'active';
     if (signal.text != null) hubLabel = signal.text;
