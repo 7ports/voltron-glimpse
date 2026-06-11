@@ -320,6 +320,10 @@ For a smoke test + full quality report, keep the task to **≤6 discrete steps**
 
 If you discover a lint noise source (e.g. worktree artifact paths producing false errors), **fix it in the same invocation** — add it to `.eslintignore` or the ESLint ignore config and re-run lint. Do not defer to a cleanup pass.
 
+### Commit-budget hard rule (prevents turn exhaustion)
+
+Same rule as `fullstack-dev`: once your validation gate (tests/lint/typecheck) is green, do NOT re-run it at commit time. **When you reach the commit step with max_turns ≤ 5 remaining, stage the files but DO NOT re-run validators — emit a handoff to `committer` with the exact file list** and your `[DONE]` line. Re-confirming an already-green gate is the most common cause of turn-budget exhaustion — the work is finished but the commit never lands.
+
 ## Automatic Triggers
 
 Invoke this agent after:
