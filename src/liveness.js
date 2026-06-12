@@ -381,6 +381,31 @@ function createReconciler({
     }
   }
 
+  // Fast activity signal from per-container `docker logs` tailing
+  // (src/dockerLogs.js). The FIRST byte a container emits proves it has started
+  // acting/thinking — advance a still-`dispatching` node straight to `working`,
+  // ahead of the laggier `.voltron/logs` [exec]/[STEP] enrichment. Idempotent: a
+  // no-op once the node is already working or winding down, and it never fabricates
+  // step/exec detail — the logs parser remains the source of that truth.
+  function applyDockerLogActivity(nodeId) {
+    if (!nodeId) return;
+    const entry = liveAgents.get(nodeId);
+    if (!entry) return;
+    if (entry.exitScheduled) return;
+    if (entry.state !== 'dispatching') return;
+    entry.state = 'working';
+    bus.emit(EVENTS.AGENT_UPDATE, {
+      nodeId,
+      state: 'working',
+      step: entry.step != null ? entry.step : null,
+      stepNum: entry.stepNum != null ? entry.stepNum : null,
+      stepCount: entry.stepCount || 0,
+      execTs: entry.execTs != null ? entry.execTs : null,
+      recentSteps: Array.isArray(entry.recentSteps) ? entry.recentSteps.slice() : [],
+      doneSummary: entry.doneSummary != null ? entry.doneSummary : null,
+    });
+  }
+
   // Degraded log-freshness fallback (used when dockerAvailable === false). Each
   // entry: { nodeId, agent, containerName, createdAt, state, exitCode, hasExec,
   // mtimeMs }. A log with [exec] and no [exit] whose mtime is within freshnessMs
@@ -513,6 +538,7 @@ function createReconciler({
   return {
     applyDockerPoll,
     applyLogEvent,
+    applyDockerLogActivity,
     applyLogFreshness,
     applyJournalEvent,
     getLiveSet: snapshot,

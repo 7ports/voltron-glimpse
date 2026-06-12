@@ -12,6 +12,7 @@ const { createHttpServer } = require('../src/transport/httpServer');
 const { createWsServer } = require('../src/transport/wsServer');
 const { createWatcher } = require('../src/watcher');
 const { pollDocker } = require('../src/docker');
+const { createDockerLogTailer } = require('../src/dockerLogs');
 const { createReconciler, HUB_ID } = require('../src/liveness');
 const { parseLog } = require('../src/parsers/logs');
 const { normalizePodPath } = require('../src/pods');
@@ -313,8 +314,19 @@ async function main() {
 
   let pollTimer = null;
   let lastAvailable = null;
+  let logTailer = null;
 
   if (opts.docker) {
+    // Per-container `docker logs` tailing — the FAST activity signal. A container
+    // can stream to `docker logs` (visibly thinking) before its first
+    // `.voltron/logs` [exec]/[STEP] line lands; this advances the node
+    // dispatching→working from the first byte it emits. Read-only; created only in
+    // Docker mode so the --no-docker path never spawns.
+    logTailer = createDockerLogTailer({
+      onActivity: function (nodeId) {
+        reconciler.applyDockerLogActivity(nodeId);
+      },
+    });
     // Authoritative membership from `docker ps`.
     const pollOnce = async function () {
       const result = await pollDocker({ cwd: projectRoot, podCache, selfPodKey, scope: podScope });
@@ -325,6 +337,10 @@ async function main() {
       const foreignRoots = planLogObservability(result.containers);
       watcher.syncLogRoots(foreignRoots);
       reconciler.applyDockerPoll(result);
+      // Start/stop per-container docker-logs tails to match the live set. Synced
+      // only when the daemon actually answered (available:true) so a transient
+      // daemon blip never tears down healthy tails or spawns against a dead socket.
+      if (result.available) logTailer.sync(result.containers);
       // Poll-driven log re-tail on the same cadence: advance [exec]/[STEP]/[exit]
       // enrichment without depending on chokidar native fs-watch events firing
       // (unreliable for container-written logs on WSL2/Windows bind mounts). The
@@ -372,6 +388,7 @@ async function main() {
     if (closing) return;
     closing = true;
     if (pollTimer) clearInterval(pollTimer);
+    if (logTailer) logTailer.close();
     process.stdout.write('\nvoltron-glimpse: shutting down…\n');
     Promise.resolve()
       .then(function () {
