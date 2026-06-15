@@ -51,6 +51,11 @@ window.GLIMPSE_CYTO_STYLE = [
       'text-wrap':          'wrap',
       'text-max-width':     80,
       'text-margin-y':      4,
+      /* Level-of-detail: when the rendered label would be smaller than this
+         (i.e. the graph is zoomed out to fit a dense swarm), hide it rather
+         than draw cramped, overlapping, unreadable text. Labels reappear as
+         the user zooms/pans in. Keeps high node counts legible. */
+      'min-zoomed-font-size': 8,
       'overlay-opacity':    0,
       'overlay-color':      _C.working,
       'z-index':            10,

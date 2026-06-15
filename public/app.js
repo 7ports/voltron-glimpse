@@ -423,6 +423,11 @@
       style: window.GLIMPSE_CYTO_STYLE,
       layout: { name: 'preset' },
       wheelSensitivity: 0.2,
+      // Clamp zoom so the swarm stays legible at any size: low floor lets a
+      // big set (hundreds of nodes) still fit on load; ceiling stops runaway
+      // zoom-in on a single node. fit() respects these bounds.
+      minZoom: 0.15,
+      maxZoom: 2.5,
       elements: [],
     });
 
@@ -1604,21 +1609,48 @@
   var ws = null;
   var backoff = 500;
   var BACKOFF_MAX = 10000;
+  var reconnectTimer = null;
+  var connected = false;
 
   function connect() {
+    // Tear down any prior socket *and detach its handlers* before opening a new
+    // one. Without this, an old/overlapping socket's onclose (or a delayed
+    // onerror) fires later and stomps the badge back to "Reconnecting…" while a
+    // newer socket is open and streaming — the stuck-reconnecting bug. Detaching
+    // handlers first means this deliberate close does not trigger a reconnect.
+    if (ws) {
+      try {
+        ws.onopen = ws.onmessage = ws.onerror = ws.onclose = null;
+        ws.close();
+      } catch (e) { /* ignore */ }
+      ws = null;
+    }
+
+    var socket;
     try {
-      ws = new WebSocket('ws://' + location.host);
+      socket = new WebSocket('ws://' + location.host);
     } catch (e) {
       scheduleReconnect();
       return;
     }
+    ws = socket;
 
-    ws.onopen = function () {
+    // Flip to connected on open OR on first data — receiving a message is proof
+    // the socket is live even if the 'open' event was ever missed. Guard on
+    // identity so a superseded socket can never drive the badge.
+    function markConnected() {
+      if (socket !== ws || connected) return;
+      connected = true;
       backoff = 500;
       setConnBadge('connected', 'Connected');
+    }
+
+    socket.onopen = function () {
+      markConnected();
     };
 
-    ws.onmessage = function (ev) {
+    socket.onmessage = function (ev) {
+      markConnected();
       try {
         var msg = JSON.parse(ev.data);
         if (!msg || typeof msg !== 'object') return;
@@ -1632,20 +1664,27 @@
       }
     };
 
-    ws.onerror = function () {
-      try { ws.close(); } catch (e) { /* ignore */ }
+    socket.onerror = function () {
+      if (socket !== ws) return;       // ignore errors from a superseded socket
+      try { socket.close(); } catch (e) { /* ignore */ }
     };
 
-    ws.onclose = function () {
+    socket.onclose = function () {
+      if (socket !== ws) return;       // a superseded socket closing is not a drop
+      connected = false;
       setConnBadge('reconnecting', 'Reconnecting…');
       scheduleReconnect();
     };
   }
 
   function scheduleReconnect() {
+    if (reconnectTimer) return;        // collapse duplicate reconnect requests
     var jitter = Math.floor(Math.random() * 250);
     var delay = Math.min(backoff, BACKOFF_MAX) + jitter;
-    setTimeout(connect, delay);
+    reconnectTimer = setTimeout(function () {
+      reconnectTimer = null;
+      connect();
+    }, delay);
     backoff = Math.min(backoff * 2, BACKOFF_MAX);
   }
 
