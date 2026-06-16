@@ -25,7 +25,10 @@
   },
   "scripts": {
     "start": "node bin/cli.js",
-    "test": "node --test"
+    "test": "node --test",
+    "stress:smoke": "node scripts/stress/run-smoke.js",
+    "stress:soak": "node scripts/stress/run-soak.js --full",
+    "stress:soak:abbrev": "node scripts/stress/run-soak.js --abbrev"
   },
   "dependencies": {
     "chokidar": "^3.6.0",

@@ -51,6 +51,11 @@ window.GLIMPSE_CYTO_STYLE = [
       'text-wrap':          'wrap',
       'text-max-width':     80,
       'text-margin-y':      4,
+      /* Level-of-detail: when the rendered label would be smaller than this
+         (i.e. the graph is zoomed out to fit a dense swarm), hide it rather
+         than draw cramped, overlapping, unreadable text. Labels reappear as
+         the user zooms/pans in. Keeps high node counts legible. */
+      'min-zoomed-font-size': 8,
       'overlay-opacity':    0,
       'overlay-color':      _C.working,
       'z-index':            10,
@@ -118,11 +123,11 @@ window.GLIMPSE_CYTO_STYLE = [
   },
   {
     selector: 'node.tier2',
-    style: { 'width': 44, 'height': 44, 'font-size': 10 }
+    style: { 'shape': 'rectangle', 'width': 44, 'height': 44, 'font-size': 10 }
   },
   {
     selector: 'node.tier3',
-    style: { 'width': 28, 'height': 28, 'font-size': 9, 'text-max-width': 60 }
+    style: { 'shape': 'triangle', 'width': 28, 'height': 28, 'font-size': 9, 'text-max-width': 60 }
   },
 
   /* ─── Live status colours ─────────────────────────────────────────────

@@ -553,3 +553,59 @@ test('a non-matching enter leaves dispatchTaskText null (best-effort, never wron
   assert.ok(b);
   assert.strictEqual(b.dispatchTaskText, null);
 });
+
+test('applyDockerLogActivity advances a dispatching node to working without a log event', () => {
+  const timer = makeFakeTimer();
+  const bus = createEventBus();
+  const ev = collect(bus);
+  const r = createReconciler({ bus, timer });
+
+  r.applyDockerPoll({ available: true, containers: [A] });
+  assert.strictEqual(r.snapshot().liveAgents[0].state, 'dispatching');
+  ev.length = 0;
+
+  // Docker-logs tail saw the container's first byte — no `.voltron/logs` event yet.
+  r.applyDockerLogActivity('A');
+
+  const updates = ev.filter((e) => e.type === 'update');
+  assert.strictEqual(updates.length, 1);
+  assert.strictEqual(updates[0].p.nodeId, 'A');
+  assert.strictEqual(updates[0].p.state, 'working');
+  assert.strictEqual(r.snapshot().liveAgents[0].state, 'working');
+});
+
+test('applyDockerLogActivity is idempotent and never overwrites richer log state', () => {
+  const timer = makeFakeTimer();
+  const bus = createEventBus();
+  const ev = collect(bus);
+  const r = createReconciler({ bus, timer });
+
+  r.applyDockerPoll({ available: true, containers: [A] });
+  // Logs enrichment already advanced + added a step.
+  r.applyLogEvent({ nodeId: 'A', state: 'working', exitCode: null, latestStep: '[STEP 1] x' });
+  ev.length = 0;
+
+  // A late docker-logs signal must be a no-op (no event, step preserved).
+  r.applyDockerLogActivity('A');
+  assert.strictEqual(ev.filter((e) => e.type === 'update').length, 0);
+  assert.strictEqual(r.snapshot().liveAgents[0].step, '[STEP 1] x');
+});
+
+test('applyDockerLogActivity is a no-op for unknown or winding-down nodes', () => {
+  const timer = makeFakeTimer();
+  const bus = createEventBus();
+  const ev = collect(bus);
+  const r = createReconciler({ bus, timer, lingerMs: 2500 });
+
+  // Unknown nodeId — never crashes, emits nothing.
+  assert.doesNotThrow(() => r.applyDockerLogActivity('ghost'));
+  assert.strictEqual(ev.length, 0);
+
+  // Winding-down node — activity must not resurrect it to working.
+  r.applyDockerPoll({ available: true, containers: [A] });
+  r.applyLogEvent({ nodeId: 'A', state: 'done', exitCode: 0, latestStep: null });
+  ev.length = 0;
+  r.applyDockerLogActivity('A');
+  assert.strictEqual(ev.filter((e) => e.type === 'update').length, 0);
+  assert.strictEqual(r.snapshot().liveAgents[0].state, 'exiting:done');
+});
