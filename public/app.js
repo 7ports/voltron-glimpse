@@ -73,8 +73,15 @@
 
   var podRegistry = {}; // podKey → { label, isSelf, hue }
 
-  // Multi-pod state — derived from podRegistry when >= 2 distinct pods are live.
-  var multiPodMode = false; // true when 2+ pods visible; drives compound-parent rendering
+  // Multi-pod state — derived from podRegistry.
+  //   podBoxMode  — true when >= 1 named pod is live; drives compound-parent
+  //                 (pod-box) rendering so even a SINGLE live pod is labelled
+  //                 and identifiable.
+  //   multiPodMode — true when >= 2 pods are live; drives hub-id namespacing
+  //                 (scrum-master@pod) and the per-pod grid layout. Namespacing
+  //                 only makes sense at 2+, so it stays decoupled from boxing.
+  var podBoxMode = false;   // true when 1+ pods visible; drives pod-box rendering
+  var multiPodMode = false; // true when 2+ pods visible; drives hub-id namespacing
   var selfPodId = null;     // podKey whose selfPod===true (the CLI's own project)
   var selfPodLabel = null;  // basename for the self-pod status badge
 
@@ -130,15 +137,23 @@
     recomputeMultiPodMode();
   }
 
-  // Recompute multiPodMode from podRegistry. Called automatically by registerPod.
+  // Recompute podBoxMode (1+ pods) and multiPodMode (2+ pods) from podRegistry.
+  // Called automatically by registerPod.
   // When the mode first transitions false→true mid-session, existing nodes are
   // retroactively grouped into compound parents via a clean graph rebuild.
   function recomputeMultiPodMode() {
     var wasMulti = multiPodMode;
-    multiPodMode = Object.keys(podRegistry).length > 1;
-    // Guard: only retrofit when there are actual nodes in the graph (not during a
-    // snapshot rebuild where cy.elements().remove() already cleared the canvas).
-    if (!wasMulti && multiPodMode && cy && cy.nodes().length > 0) {
+    var wasBox = podBoxMode;
+    var podCount = Object.keys(podRegistry).length;
+    podBoxMode = podCount >= 1;
+    multiPodMode = podCount > 1;
+    // Retrofit when the rendered structure changes: boxing turns on at the first
+    // pod (parents existing nodes into a box), namespacing at the second (re-keys
+    // the hubs). Guard: only when there are actual nodes in the graph (not during
+    // a snapshot rebuild where cy.elements().remove() already cleared the canvas).
+    var boxTurnedOn = !wasBox && podBoxMode;
+    var multiTurnedOn = !wasMulti && multiPodMode;
+    if ((boxTurnedOn || multiTurnedOn) && cy && cy.nodes().length > 0) {
       retrofitCompoundParents();
     }
   }
@@ -180,10 +195,11 @@
     return 'pod::' + (podKey || 'unknown');
   }
 
-  // Ensure a Cytoscape compound-parent node for a pod exists (multi-pod only).
-  // The solid boundary signals real mount-source attribution (not inferred).
+  // Ensure a Cytoscape compound-parent node for a pod exists (whenever 1+ pods
+  // are live). The solid boundary signals real mount-source attribution (not
+  // inferred) and labels the pod so even a single live pod is identifiable.
   function ensureCompoundParent(podKey) {
-    if (!cy || !multiPodMode) return;
+    if (!cy || !podBoxMode) return;
     var pid = compoundParentId(podKey);
     if (cy.getElementById(pid).nonempty()) return;
     var reg = podRegistry[podKey] || { label: podKey || 'unknown', isSelf: false, hue: null };
@@ -218,7 +234,7 @@
       ? HUB_ID + '\n' + reg.label
       : hubLabel(hubState);
     var nodeData = { id: hid, label: label, agent: HUB_ID, tier: 1, podKey: podKey };
-    if (multiPodMode && podKey) {
+    if (podBoxMode && podKey) {
       ensureCompoundParent(podKey);
       nodeData.parent = compoundParentId(podKey);
     }
@@ -480,7 +496,9 @@
   // journal-active (hubState non-null). Multi-pod mode creates one hub per pod.
   function ensureHubNode() {
     if (!cy) return;
-    if (multiPodMode) {
+    if (podBoxMode) {
+      // One hub per pod, parented into its box. In single-pod mode the hub id is
+      // still the un-namespaced HUB_ID (namespacing only kicks in at 2+ pods).
       Object.keys(podRegistry).forEach(function (podKey) { ensureHubNodeForPod(podKey); });
     } else {
       ensureHubNodeForPod(null);
@@ -489,13 +507,14 @@
 
   function removeHubIfOrphan() {
     if (!cy) return;
-    if (!multiPodMode) {
+    if (!podBoxMode) {
       if (hubState !== null || Object.keys(liveAgents).length > 0) return;
       var hub = cy.getElementById(HUB_ID);
       if (hub.nonempty()) hub.remove();
       return;
     }
-    // Multi-pod: remove each pod's hub (and empty compound parent) independently.
+    // Pod-box mode (1+ pods): remove each pod's hub (and its now-empty compound
+    // parent box) independently, so a single pod's box is torn down when it exits.
     Object.keys(podRegistry).forEach(function (podKey) {
       var hid = hubIdForPod(podKey);
       var isSelfPod = (podKey === selfPodId);
@@ -520,8 +539,12 @@
     var ele = cy.getElementById(id);
     var added = false;
 
-    // Pre-register the pod so multiPodMode + compound parents are ready before cy.add().
+    // Pre-register the pod so podBoxMode + compound parents are ready before cy.add().
+    // registerPod() may trigger retrofitCompoundParents() (first/second pod
+    // appearing mid-session), which rebuilds the graph and re-adds this node.
+    // Re-fetch the handle afterward so we don't double-add an id that now exists.
     if (entry.podKey) registerPod(entry.podKey, entry.podLabel, entry.selfPod);
+    ele = cy.getElementById(id);
 
     if (ele.empty()) {
       var podKey = entry.podKey || null;
@@ -537,7 +560,7 @@
         tier: tier,
         podKey: podKey,
       };
-      if (multiPodMode && podKey) {
+      if (podBoxMode && podKey) {
         ensureCompoundParent(podKey);
         nodeData.parent = compoundParentId(podKey);
       }
@@ -617,7 +640,7 @@
     var entry = liveAgents[targetId];
     var podKey = entry && (entry.podKey || null);
     var hid = hubIdForPod(podKey);
-    if (multiPodMode && podKey) {
+    if (podBoxMode && podKey) {
       ensureHubNodeForPod(podKey);
     } else {
       ensureHubNodeForPod(null);
@@ -1430,6 +1453,7 @@
     liveAgents = {};
     edges = [];
     podRegistry = {}; // full reset — snapshot is authoritative
+    podBoxMode = false;
     multiPodMode = false;
     if (cy) cy.elements().remove();
 
@@ -1455,10 +1479,11 @@
       var entry = la[id];
       if (entry && entry.podKey) registerPod(entry.podKey, entry.podLabel, entry.selfPod);
     });
-    // Pre-create compound parents now that multiPodMode is definitive. The
+    // Pre-create compound parents now that podBoxMode is definitive. The
     // cy.nodes().length guard in recomputeMultiPodMode prevented auto-retrofit
-    // (graph is empty), so we do it manually here.
-    if (multiPodMode) {
+    // (graph is empty), so we do it manually here. Runs for a single pod too so
+    // its box exists before the first agent node is added.
+    if (podBoxMode) {
       Object.keys(podRegistry).forEach(function (podKey) { ensureCompoundParent(podKey); });
     }
 
