@@ -61,8 +61,28 @@ function createWatcher(projectRoot, onLogEvent, onJournalEvent) {
   // logsDir (resolved) -> { dir, watcher, offsets, pinned, podKey, podLabel }
   const logRoots = new Map();
 
-  function handleLogFile(file, offsets) {
-    const from = offsets.get(file) || 0;
+  // Tail one log file for an entry, resetting the offset on ROTATION (the path
+  // now points at a different inode — old file renamed away, fresh file created)
+  // so the new file is read from the start instead of inheriting the stale
+  // offset. Truncation-in-place (same inode, smaller size) is handled downstream
+  // inside tailLog. `entry` carries both the offset and inode maps.
+  function handleLogFile(file, entry) {
+    const offsets = entry.offsets;
+    const inodes = entry.inodes;
+    let ino = null;
+    try {
+      ino = fs.statSync(file).ino;
+    } catch (_e) {
+      return; // file vanished between readdir and stat — skip this tick
+    }
+    const prevIno = inodes.get(file);
+    let from = offsets.get(file) || 0;
+    if (prevIno !== undefined && ino !== prevIno) {
+      // Rotation detected: the inode changed under a stable path. The tracked
+      // offset belongs to the now-rotated-away file; read the new file from 0.
+      from = 0;
+    }
+    inodes.set(file, ino);
     const { event, newOffset } = tailLog(file, from);
     offsets.set(file, newOffset);
     if (event) onLogEvent(event);
@@ -106,6 +126,9 @@ function createWatcher(projectRoot, onLogEvent, onJournalEvent) {
       dir: logsDir,
       watcher,
       offsets,
+      // inode per file alongside the offset — a changed inode under a stable
+      // path means rotation, which resets the offset (see handleLogFile).
+      inodes: new Map(),
       pinned: !!pinned,
       podKey: meta ? meta.podKey : null,
       podLabel: meta ? meta.podLabel : null,
@@ -158,7 +181,7 @@ function createWatcher(projectRoot, onLogEvent, onJournalEvent) {
     if (path.dirname(resolved) !== entry.dir) return;
     if (path.extname(resolved).toLowerCase() !== '.log') return;
     debounce(resolved, DEBOUNCE_MS, function () {
-      handleLogFile(resolved, entry.offsets);
+      handleLogFile(resolved, entry);
     });
   }
 
@@ -242,7 +265,7 @@ function createWatcher(projectRoot, onLogEvent, onJournalEvent) {
   function pollTail() {
     for (const entry of logRoots.values()) {
       pollDir(entry.dir, '.log', function (file) {
-        handleLogFile(file, entry.offsets);
+        handleLogFile(file, entry);
       });
     }
     pollDir(journalDir, '.md', handleJournal);

@@ -1,8 +1,24 @@
 const { WebSocketServer, WebSocket } = require('ws');
 const { EVENTS } = require('../eventBus');
 
+// Backpressure cap: if a client's unflushed outbound buffer exceeds this, it is a
+// stuck/dead consumer. Terminate it rather than let bufferedAmount grow without
+// bound and balloon server RSS. Patch/snapshot envelopes are small JSON, so 1 MiB
+// is far above any healthy steady state yet bounds the worst case per-client.
+const MAX_BUFFERED_BYTES = 1024 * 1024; // 1 MiB
+
 function safeSend(client, payload) {
   if (client.readyState !== WebSocket.OPEN) return;
+  // Drop a backpressured consumer before sending so one slow/dead client cannot
+  // accumulate unbounded buffer; healthy clients keep receiving normally.
+  if (client.bufferedAmount > MAX_BUFFERED_BYTES) {
+    try {
+      client.terminate();
+    } catch (_err) {
+      // ignore terminate failures; don't crash broadcast
+    }
+    return;
+  }
   try {
     client.send(JSON.stringify(payload));
   } catch (_err) {
@@ -55,4 +71,4 @@ function createWsServer(httpServer, stateModel, bus) {
   return { wss, close };
 }
 
-module.exports = { createWsServer };
+module.exports = { createWsServer, safeSend, MAX_BUFFERED_BYTES };

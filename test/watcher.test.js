@@ -113,6 +113,43 @@ test('syncLogRoots: the self/pinned root is never dropped even when sync exclude
   await w.close();
 });
 
+test('pollTail: rotation (recreate with a new inode) resets the offset and reads the new file', async () => {
+  const root = mkTmpRoot();
+  const logsDir = path.join(root, '.voltron', 'logs');
+  const logFile = path.join(logsDir, 'fullstack-dev-2026-06-16T13-00-00.log');
+
+  const events = [];
+  const w = createWatcher(root, (e) => events.push(e));
+
+  // Initial run: read to EOF, offset advanced well past a short follow-up file.
+  fs.writeFileSync(
+    logFile,
+    '[entry] x\n[exec] x\n[STEP 1] long initial content here\n[STEP 2] more\n'
+  );
+  w.pollTail();
+  assert.strictEqual(events.length, 1, 'initial content read once');
+  assert.strictEqual(events[0].latestStep, '[STEP 2] more');
+  const oldIno = fs.statSync(logFile).ino;
+
+  // Rotate: move the original aside (out of the logs dir so it is not re-tailed)
+  // and create a FRESH log at the same path with a new inode and SMALLER size.
+  // The stale offset would skip the new file's content without inode detection.
+  fs.renameSync(logFile, path.join(root, 'rotated-away.oldlog'));
+  fs.writeFileSync(logFile, '[STEP 3] post-rotation\n');
+  const newIno = fs.statSync(logFile).ino;
+  assert.notStrictEqual(newIno, oldIno, 'recreated file has a new inode');
+
+  w.pollTail();
+  assert.strictEqual(events.length, 2, 'rotation resets offset; new file read from 0');
+  assert.strictEqual(events[1].latestStep, '[STEP 3] post-rotation', 'post-rotation content delivered');
+
+  // Idempotent after the rotated content is consumed.
+  w.pollTail();
+  assert.strictEqual(events.length, 2, 'no re-processing once the new file is consumed');
+
+  await w.close();
+});
+
 test('pollTail: tolerates a missing logs dir without throwing', () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'glimpse-watcher-nodir-'));
   // No .voltron/logs created on purpose.
