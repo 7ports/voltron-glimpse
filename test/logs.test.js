@@ -2,6 +2,7 @@ const test = require('node:test');
 const assert = require('node:assert');
 const path = require('node:path');
 const fs = require('node:fs');
+const os = require('node:os');
 const { parseLog, tailLog } = require('../src/parsers/logs');
 
 const FIX_DIR = path.join(__dirname, 'fixtures', '.voltron', 'logs');
@@ -106,8 +107,35 @@ test('tailLog: reads only bytes after fromOffset', () => {
   assert.strictEqual(second.newOffset, size);
   assert.strictEqual(second.event, null);
 
+  // An offset BEYOND the current size signals truncation (the file shrank
+  // under the tracked offset) — recover by re-reading from 0, not skipping.
   const third = tailLog(filePath, size + 1000);
-  assert.strictEqual(third.event, null);
+  assert.ok(third.event, 'offset past EOF (truncation) re-reads from 0');
+  assert.strictEqual(third.newOffset, size);
+});
+
+test('tailLog: truncate-in-place then append — appended content is delivered', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'glimpse-logs-trunc-'));
+  const file = path.join(dir, 'fullstack-dev-2026-06-16T09-00-00.log');
+
+  // Write an initial run, tail it to EOF.
+  fs.writeFileSync(file, '[entry] x\n[exec] x\n[STEP 1] one\n');
+  const first = tailLog(file, 0);
+  assert.ok(first.event, 'initial content read');
+  assert.strictEqual(first.event.latestStep, '[STEP 1] one');
+  const trackedOffset = first.newOffset;
+
+  // Truncate to 0, then append fresh content SHORTER than the old offset.
+  fs.truncateSync(file, 0);
+  fs.appendFileSync(file, '[STEP 2] after truncation\n');
+  assert.ok(fs.statSync(file).size < trackedOffset, 'new size is below the stale offset');
+
+  // Tailing with the stale (too-large) offset must recover and read from 0.
+  const second = tailLog(file, trackedOffset);
+  assert.ok(second.event, 'post-truncation append is delivered, not skipped');
+  assert.strictEqual(second.event.latestStep, '[STEP 2] after truncation');
+
+  fs.rmSync(dir, { recursive: true, force: true });
 });
 
 test('parseLog: captures execTs from the [exec] line', () => {

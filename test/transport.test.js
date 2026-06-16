@@ -7,7 +7,7 @@ const path = require('path');
 const WebSocket = require('ws');
 
 const { createHttpServer } = require('../src/transport/httpServer');
-const { createWsServer } = require('../src/transport/wsServer');
+const { createWsServer, safeSend, MAX_BUFFERED_BYTES } = require('../src/transport/wsServer');
 const { StateModel } = require('../src/state');
 const { createEventBus, EVENTS } = require('../src/eventBus');
 
@@ -138,6 +138,55 @@ test('wsServer sends a snapshot on connect and broadcasts patches on bus events'
   const patch = await patchPromise;
   assert.strictEqual(patch.event, EVENTS.AGENT_ENTER);
   assert.deepStrictEqual(patch.payload, { nodeId: 'a2', agent: 'fullstack', state: 'dispatching' });
+});
+
+// Minimal stand-in for a ws client so we can drive bufferedAmount/readyState
+// directly without a real socket.
+function makeMockClient(bufferedAmount) {
+  return {
+    readyState: WebSocket.OPEN,
+    bufferedAmount,
+    sent: [],
+    terminated: false,
+    send(data) { this.sent.push(data); },
+    terminate() { this.terminated = true; this.readyState = WebSocket.CLOSING; },
+  };
+}
+
+test('safeSend drops a backpressured client without starving a healthy one', () => {
+  const healthy = makeMockClient(0);
+  const slow = makeMockClient(MAX_BUFFERED_BYTES + 1);
+  const msg = { type: 'patch', event: 'agent:enter', payload: { nodeId: 'a1' } };
+
+  // Broadcast to both, mixed order, just as the per-event loop would.
+  safeSend(healthy, msg);
+  safeSend(slow, msg);
+
+  // Healthy client received the message and was left open.
+  assert.strictEqual(healthy.sent.length, 1, 'healthy client should receive the message');
+  assert.deepStrictEqual(JSON.parse(healthy.sent[0]), msg);
+  assert.strictEqual(healthy.terminated, false, 'healthy client should not be terminated');
+
+  // Slow client was terminated and never enqueued anything (no unbounded buffering).
+  assert.strictEqual(slow.sent.length, 0, 'backpressured client should not be sent to');
+  assert.strictEqual(slow.terminated, true, 'backpressured client should be terminated');
+});
+
+test('safeSend never buffers for a stuck consumer across repeated broadcasts', () => {
+  const slow = makeMockClient(MAX_BUFFERED_BYTES + 1);
+  for (let i = 0; i < 1000; i++) {
+    safeSend(slow, { type: 'patch', event: 'agent:update', payload: { i } });
+  }
+  // Not a single byte enqueued despite 1000 broadcasts → memory cannot grow unbounded.
+  assert.strictEqual(slow.sent.length, 0, 'stuck consumer must accumulate nothing');
+  assert.strictEqual(slow.terminated, true);
+});
+
+test('safeSend sends to a client exactly at the threshold (boundary)', () => {
+  const atLimit = makeMockClient(MAX_BUFFERED_BYTES);
+  safeSend(atLimit, { type: 'patch', event: 'agent:enter', payload: {} });
+  assert.strictEqual(atLimit.sent.length, 1, 'client at (not over) threshold should still receive');
+  assert.strictEqual(atLimit.terminated, false);
 });
 
 test('httpServer returns 404 for unknown paths', { timeout: 5000 }, async (t) => {

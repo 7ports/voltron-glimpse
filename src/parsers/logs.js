@@ -114,7 +114,15 @@ function tailLog(filePath, fromOffset = 0) {
     return { event: null, newOffset: Number(fromOffset) || 0 };
   }
   const size = stat.size;
-  const start = Math.max(0, Number(fromOffset) || 0);
+  let start = Math.max(0, Number(fromOffset) || 0);
+  // Truncation-in-place recovery: a tracked offset GREATER than the file's
+  // current size means the file shrank (was truncated, then possibly
+  // re-appended). The stale offset would skip every post-truncation byte, so
+  // reset to 0 and read the file from the beginning. (start === size is the
+  // normal "no new bytes" case and is left to the early-return below.)
+  if (start > size) {
+    start = 0;
+  }
   if (start >= size) {
     return { event: null, newOffset: size };
   }
