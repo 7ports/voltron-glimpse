@@ -19,13 +19,16 @@ const DEBOUNCE_MS = 120;
 // leave the live set. Every pod's log events flow into the SAME onLogEvent sink
 // (nodeIds are globally unique, so the reconciler needs no per-pod awareness).
 //
-// Offsets are tracked per file so only new bytes are parsed. The self log root and
-// the journal are seeded to EOF at scanExisting() (present-tense rule §2.5 — the
-// launch pod's history is not replayed). Foreign roots are deliberately NOT
-// seeded: a foreign pod is discovered while already running, so its current log is
-// read from offset 0 to catch the container up to its present state. Native fs
-// events are unreliable on WSL2/Windows bind mounts, so pollTail() re-tails every
-// root + the journal on the poll cadence as the authoritative belt-and-suspenders.
+// Offsets are tracked per file so only new bytes are parsed. ONLY the journal is
+// seeded to EOF at scanExisting() (present-tense rule §2.5 — replaying it would
+// re-fire historical dispatch flashes + hub churn). Log roots — self/pinned AND
+// foreign — are deliberately NOT seeded: an agent already running when Glimpse
+// starts has its current [exec]/[STEP] state only in its pre-start log bytes, so
+// reading from offset 0 catches the container up to its present state (a
+// consolidated present-state event, not a temporal replay — see scanExisting()).
+// Native fs events are unreliable on WSL2/Windows bind mounts, so pollTail()
+// re-tails every root + the journal on the poll cadence as the authoritative
+// belt-and-suspenders.
 // Read-only: only reads/stats/tails — never writes.
 function createWatcher(projectRoot, onLogEvent, onJournalEvent) {
   if (!projectRoot || typeof projectRoot !== 'string') {
@@ -232,9 +235,20 @@ function createWatcher(projectRoot, onLogEvent, onJournalEvent) {
   }
 
   function scanExisting() {
-    for (const entry of logRoots.values()) {
-      if (entry.pinned) seedDir(entry.dir, '.log', entry.offsets);
-    }
+    // Only the JOURNAL is seeded to EOF. Replaying the launch pod's journal would
+    // re-fire historical dispatch flashes + churn the hub label (a real
+    // present-tense violation), so its history stays skipped (§2.5).
+    //
+    // Log roots are deliberately NOT seeded — including the self/pinned root. An
+    // agent already running when Glimpse starts has its current [exec]/[STEP] state
+    // ONLY in its pre-start log bytes; reading from offset 0 catches it up to its
+    // present state (identical to the foreign-root catch-up). parseLog consolidates
+    // the whole file into ONE present-state event (recentSteps capped at 5), and
+    // applyLogEvent enriches only nodeIds Docker reports LIVE — a finished agent's
+    // stale log is parsed then dropped — so this is a present-state catch-up, never
+    // a temporal replay. Without it, an already-running agent's detail panel shows
+    // no step output, because the docker-logs tailer only flips state→working and
+    // never carries step text (bead glimpse-qb0).
     seedDir(journalDir, '.md', journalOffsets);
   }
 

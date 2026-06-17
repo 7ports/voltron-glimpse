@@ -47,6 +47,55 @@ test('pollTail: tails appended bytes exactly once (offset advances, no re-proces
   await w.close();
 });
 
+test('scanExisting: a pre-existing SELF/pinned log is caught up from offset 0 (bead glimpse-qb0 regression)', async () => {
+  // An agent already running when Glimpse starts has its [exec]/[STEP] history
+  // ONLY in its pre-start self-pod log. scanExisting() must NOT seed the self root
+  // to EOF (which would skip that history and leave the detail panel's step output
+  // empty) — it must read from offset 0 to catch the live agent up to its present
+  // state, exactly like a foreign root.
+  const root = mkTmpRoot();
+  const logsDir = path.join(root, '.voltron', 'logs');
+  const logFile = path.join(logsDir, 'fullstack-dev-2026-06-17T09-00-00.log');
+
+  // Multi-step history written BEFORE Glimpse begins watching.
+  fs.writeFileSync(
+    logFile,
+    [
+      '[entry] fullstack-dev-2026-06-17T09-00-00',
+      '[exec] fullstack-dev-2026-06-17T09-00-00',
+      '[STEP 1] reading files',
+      '[STEP 2] editing route',
+      '[STEP 3] running tsc',
+      '',
+    ].join('\n')
+  );
+
+  const events = [];
+  const w = createWatcher(root, (e) => events.push(e));
+  w.scanExisting(); // must seed ONLY the journal, never the self/pinned log root
+
+  w.pollTail();
+  assert.strictEqual(events.length, 1, 'pre-existing self log read from offset 0 in one consolidated event');
+  assert.strictEqual(events[0].agent, 'fullstack-dev');
+  assert.strictEqual(events[0].state, 'working', '[exec] in the existing self log => working');
+  assert.strictEqual(events[0].latestStep, '[STEP 3] running tsc', 'latest step carried for the panel');
+  assert.strictEqual(events[0].stepNum, 3);
+  // The consolidated event carries EVERY historical step so recentSteps can fill.
+  assert.strictEqual(events[0].steps.length, 3, 'all historical steps present in the catch-up event');
+
+  // Idempotent: once the history is consumed, no growth => no re-processing.
+  w.pollTail();
+  assert.strictEqual(events.length, 1, 'no re-processing of already-consumed self-log bytes');
+
+  // A post-startup append is tailed once (only the new bytes).
+  fs.appendFileSync(logFile, '[STEP 4] committing\n');
+  w.pollTail();
+  assert.strictEqual(events.length, 2, 'post-startup append tailed once');
+  assert.strictEqual(events[1].latestStep, '[STEP 4] committing');
+
+  await w.close();
+});
+
 test('syncLogRoots: a FOREIGN pod root is tailed from offset 0 and routes into the same sink', async () => {
   const self = mkTmpRoot();
   const foreign = mkTmpRoot();

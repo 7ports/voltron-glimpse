@@ -8,16 +8,16 @@
 // both liveness modes, and that a GENUINELY fresh (no-output-yet) container still
 // starts as `dispatching`.
 //
-// Why this needs dedicated coverage: in Docker mode the self-pod `.voltron/logs`
-// watcher seeds its offsets to EOF at scanExisting() (present-tense rule §2.5), so
-// it deliberately does NOT replay an already-running container's historical
-// [exec]/[STEP] lines. The ONLY thing that lifts such a container off `dispatching`
-// at startup is the glimpse-09g docker-logs tailer: `docker logs -f --tail N`
-// replays the container's stdout history, whose first byte fires
-// applyDockerLogActivity(). These tests wire the REAL tailer to the REAL reconciler
-// and drive the exact startup ordering the CLI uses (applyDockerPoll -> tailer.sync
-// -> historical replay), so a future refactor that breaks startup-after-agents
-// fails here instead of silently in production.
+// Why this needs dedicated coverage: at startup the docker-logs tailer
+// (glimpse-09g) is the FAST bridge that lifts an already-running container off
+// `dispatching` — `docker logs -f --tail N` replays the container's stdout history
+// and its first byte fires applyDockerLogActivity(). (The self-pod `.voltron/logs`
+// watcher ALSO catches such an agent up to its present [exec]/[STEP] state by
+// reading from offset 0 — bead glimpse-qb0 — but that carries step TEXT, while this
+// tailer is the no-output-yet activity signal proven here.) These tests wire the
+// REAL tailer to the REAL reconciler and drive the exact startup ordering the CLI
+// uses (applyDockerPoll -> tailer.sync -> historical replay), so a future refactor
+// that breaks startup-after-agents fails here instead of silently in production.
 
 const { test } = require('node:test');
 const assert = require('node:assert');
