@@ -157,6 +157,32 @@ test('parseLog: unnumbered [STEP] yields stepNum === null', () => {
   assert.strictEqual(p.stepNum, null);
 });
 
+test('parseLog: stream-JSON log mines embedded [STEP N]/[DONE] markers from JSON text', () => {
+  // Real production logs are stream-JSON: each line is a JSON event and the
+  // agent's [STEP N]/[DONE] markers live INSIDE assistant-message text fields
+  // (often backtick-wrapped), never at line-start. The old parser dropped any
+  // line whose first char wasn't '[', so steps[] stayed empty in production.
+  const file = 'agent-stream-json.log';
+  const content = fs.readFileSync(path.join(__dirname, 'fixtures', file), 'utf8');
+  const p = parseLog(content, file);
+  assert.ok(p, 'should return a payload');
+
+  const stepEntries = p.steps.filter((s) => /^\[STEP /.test(s.text));
+  assert.ok(stepEntries.length >= 1, 'must parse >=1 [STEP N] from stream-JSON text');
+  assert.ok(
+    stepEntries.some((s) => s.stepNum === 1),
+    'embedded "[STEP 1] ..." should yield stepNum === 1'
+  );
+
+  // The embedded [DONE] marker is captured too, and the [exit] line still works.
+  assert.ok(
+    p.steps.some((s) => /^\[DONE\]/.test(s.text)),
+    'embedded [DONE] marker should be captured'
+  );
+  assert.strictEqual(p.exitCode, 0);
+  assert.strictEqual(p.state, 'done');
+});
+
 test('parseLog: a chunk with two step lines returns both in order', () => {
   const content = '[STEP 1] first\n[STEP 2] second\n';
   const p = parseLog(content, 'foo-2026-01-01T00-00-00.log');
