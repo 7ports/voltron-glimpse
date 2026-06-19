@@ -10,10 +10,17 @@ const RE_DONE = /^\[DONE\]\s*(.*)$/;
 // Embedded-marker variants for stream-JSON logs: the real container wrapper
 // writes each line as a JSON event and the agent's [STEP N]/[DONE] markers live
 // INSIDE assistant-message `text` fields — not at line-start, and often wrapped
-// in backticks (e.g. `[STEP 3] ...`). These globals scan a free text blob for
-// such markers; the body runs to the next backtick / newline / end-of-text.
-const RE_STEP_EMBED = /\[STEP(?:\s+(\d+))?\]\s*([^\n`]*)/g;
-const RE_DONE_EMBED = /\[DONE\]\s*([^\n`]*)/g;
+// in backticks. Agents wrap markers three ways, all of which must yield the same
+// clean description:
+//   1. bare:               [STEP 1] desc
+//   2. whole-marker wrap:  `[STEP 1] desc`
+//   3. token-only wrap:    `[STEP 2]` desc   <- prose lives AFTER the closing tick
+// The optional `` `? `` after `]` swallows the token-only wrapper's closing tick
+// so the description capture starts at the prose, not the backtick (which would
+// otherwise capture empty). The body then runs to the next backtick / newline /
+// end-of-text. Captured text is trimmed by pushStep/pushDone.
+const RE_STEP_EMBED = /\[STEP(?:\s+(\d+))?\]`?\s*([^\n`]*)/g;
+const RE_DONE_EMBED = /\[DONE\]`?\s*([^\n`]*)/g;
 
 const ISO_SUFFIX_RE = /-\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}(?:-[A-Za-z0-9]+)?$/;
 
