@@ -20,6 +20,7 @@ const { normalizePodPath } = require('../src/pods');
 const DEFAULT_PORT = 7424;
 const DEFAULT_POLL_MS = 1000;
 const DEFAULT_HUB_FRESHNESS_MS = 60000;
+const DEFAULT_SUBAGENT_TTL_MS = 90000;
 const HOST = '127.0.0.1';
 const PUBLIC_DIR = path.join(__dirname, '..', 'public');
 const MAX_PORT_TRIES = 50;
@@ -46,6 +47,7 @@ function printHelp() {
       '  --all-pods    Show containers from every Voltron project (default: only this one)',
       '  --pod <v>     Scope to a specific pod by basename or path (repeatable)',
       '  --hub-freshness <ms>  Journal idle window for the scrum-master hub (default 60000)',
+      '  --subagent-ttl <ms>   Stall-guard window for inferred Tier-3 children (default 90000)',
       '  --verbose     Verbose logging',
       '  -h, --help    Show this help',
       '',
@@ -61,6 +63,7 @@ function parseArgs(argv) {
     docker: true, // Docker is the default, primary liveness path now.
     poll: DEFAULT_POLL_MS,
     hubFreshness: DEFAULT_HUB_FRESHNESS_MS,
+    subagentTtl: DEFAULT_SUBAGENT_TTL_MS,
     allPods: false,
     pods: [],
     verbose: false,
@@ -117,6 +120,15 @@ function parseArgs(argv) {
           fail(`invalid --hub-freshness value: ${v}`);
         }
         opts.hubFreshness = n;
+        break;
+      }
+      case '--subagent-ttl': {
+        const v = argv[++i];
+        const n = Number.parseInt(v, 10);
+        if (!Number.isInteger(n) || n < 1) {
+          fail(`invalid --subagent-ttl value: ${v}`);
+        }
+        opts.subagentTtl = n;
         break;
       }
       case '--verbose':
@@ -285,7 +297,11 @@ async function main() {
     });
   }
 
-  const reconciler = createReconciler({ bus, hubFreshnessMs: opts.hubFreshness });
+  const reconciler = createReconciler({
+    bus,
+    hubFreshnessMs: opts.hubFreshness,
+    subagentTtlMs: opts.subagentTtl,
+  });
 
   const httpServer = createHttpServer(PUBLIC_DIR);
   const wsServer = createWsServer(httpServer, state, bus);
@@ -305,6 +321,14 @@ async function main() {
     projectRoot,
     function (parsed) {
       reconciler.applyLogEvent(parsed);
+      // §3.4/§4: a sub-manager performs its Tier-3 work in its OWN container/log,
+      // so the only on-disk trace of a dispatch is the structured tool_use mined
+      // into parsed.dispatches[]. Feed those to the reconciler keyed on this log's
+      // own nodeId — the parent — right after the standard enrichment, so a live
+      // sub-manager's log synthesizes/winds-down its inferred children.
+      if (parsed && parsed.nodeId) {
+        reconciler.applyDispatchEvents(parsed.nodeId, parsed.dispatches);
+      }
     },
     function (signal) {
       reconciler.applyJournalEvent(signal);

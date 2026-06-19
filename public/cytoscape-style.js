@@ -22,6 +22,7 @@ var _C = {
   exitingDone:    '#00e676',   /* bright vivid green terminal flash */
   exitingErrored: '#f44336',
   hub:            '#00e5ff',   /* accent cyan for the synthetic hub anchor */
+  subdispatch:    '#9c6ade',   /* violet — doubly-inferred Tier-2→Tier-3 edge */
   bg:             '#0a1628',
   border:         'rgba(255,255,255,0.18)',
   borderDim:      'rgba(255,255,255,0.08)',
@@ -128,6 +129,52 @@ window.GLIMPSE_CYTO_STYLE = [
   {
     selector: 'node.tier3',
     style: { 'shape': 'triangle', 'width': 28, 'height': 28, 'font-size': 9, 'text-max-width': 60 }
+  },
+
+  /* ─── Inferred-agent: ghosted Tier-3 triangle (§6.1) ──────────────────
+   * Applied when entry.inferred===true (synthesized sub-agent, no container).
+   * Layered on top of tier3 shape so shape/size stay unchanged; only the fill
+   * opacity and border style change to visually signal "not a real container".
+   * border-color is still overridden inline by pod accent — that's fine;
+   * border-style stays 'dashed' because it's a separate property.
+   * ─────────────────────────────────────────────────────────────────── */
+  {
+    selector: 'node.inferred-agent',
+    style: {
+      'width':              20,        /* T7: one step smaller than tier3 (28px) so fan-outs read as subordinate */
+      'height':             20,
+      'font-size':          8,
+      'background-opacity': 0.50,
+      'border-style':       'dashed',
+      'opacity':            0.80,
+    }
+  },
+
+  /* ─── Fan-out pill node (T7): "+N" collapse badge when a parent has more than
+   * SUBAGENT_FANOUT_MAX inferred children. Violet fill matches the sub-dispatch
+   * edge hue. Clicking it expands the hidden children (handled in app.js).
+   * ─────────────────────────────────────────────────────────────────── */
+  {
+    selector: 'node.pill-node',
+    style: {
+      'shape':              'roundrectangle',
+      'width':              32,
+      'height':             18,
+      'background-color':   'rgba(156,106,222,0.20)',
+      'border-color':       _C.subdispatch,
+      'border-style':       'solid',
+      'border-width':       1,
+      'color':              _C.subdispatch,
+      'font-size':          9,
+      'font-weight':        'bold',
+      'text-valign':        'center',
+      'text-halign':        'center',
+      'text-margin-y':      0,
+      'label':              'data(label)',
+      'overlay-opacity':    0,
+      'opacity':            0.90,
+      'z-index':            5,
+    }
   },
 
   /* ─── Live status colours ─────────────────────────────────────────────
@@ -252,6 +299,36 @@ window.GLIMPSE_CYTO_STYLE = [
       'overlay-color':      _C.hub,
       'overlay-opacity':    0.20,
       'z-index':            30,
+    }
+  },
+
+  /* ─── Sub-dispatch edge: Tier-2 → inferred Tier-3 child (§6.2) ────────
+   * Distinct from hub dispatch spokes: violet hue, thinner, lower base
+   * opacity — visually reads as "even less certain" (both parentage AND
+   * child existence are inferred, no container proof). rAF flow loop in
+   * app.js drives line-dash-offset while the child is working.
+   * ─────────────────────────────────────────────────────────────────── */
+  {
+    selector: 'edge.subdispatch',
+    style: {
+      'line-style':         'dashed',
+      'line-dash-pattern':  [4, 5],      /* shorter dashes → visually weaker */
+      'line-dash-offset':   0,
+      'line-color':         _C.subdispatch,
+      'target-arrow-color': _C.subdispatch,
+      'width':              1.2,
+      'opacity':            0.40,
+    }
+  },
+
+  /* Active sub-dispatch (child working): vivid violet; rAF animates dash-offset */
+  {
+    selector: 'edge.subdispatch.active',
+    style: {
+      'line-color':         _C.subdispatch,
+      'target-arrow-color': _C.subdispatch,
+      'opacity':            0.75,
+      'width':              1.6,
     }
   },
 

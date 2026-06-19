@@ -554,6 +554,266 @@ test('a non-matching enter leaves dispatchTaskText null (best-effort, never wron
   assert.strictEqual(b.dispatchTaskText, null);
 });
 
+// --- Tier-2 → Tier-3 inferred dispatch children (T3, §3.4) ----------------
+
+test('applyDispatchEvents under a LIVE parent emits AGENT_ENTER for the inferred child', () => {
+  const timer = makeFakeTimer();
+  const bus = createEventBus();
+  const ev = collect(bus);
+  const r = createReconciler({ bus, timer });
+
+  // Parent A is a live, container-backed node.
+  r.applyDockerPoll({ available: true, containers: [A] });
+  ev.length = 0;
+
+  r.applyDispatchEvents('A', [
+    {
+      kind: 'dispatch:start',
+      toolUseId: 'toolu_01Vgq',
+      childAgent: 'test-writer',
+      description: 'Write transport integration test',
+    },
+  ]);
+
+  const enters = ev.filter((e) => e.type === 'enter');
+  assert.strictEqual(enters.length, 1);
+  const p = enters[0].p;
+  assert.strictEqual(p.nodeId, 'sub::toolu_01Vgq');
+  assert.strictEqual(p.inferred, true);
+  assert.strictEqual(p.containerBacked, false);
+  assert.strictEqual(p.parentNodeId, 'A');
+  assert.strictEqual(p.agent, 'test-writer'); // normalized child agent name present
+  assert.strictEqual(p.state, 'working');
+  assert.strictEqual(p.dispatchTaskText, 'Write transport integration test');
+
+  const child = r.snapshot().liveAgents.find((e) => e.nodeId === 'sub::toolu_01Vgq');
+  assert.ok(child, 'inferred child is in the live set');
+  assert.strictEqual(child.parentNodeId, 'A');
+});
+
+test('applyDispatchEvents under an ABSENT/not-live parent emits nothing (orphan dropped)', () => {
+  const timer = makeFakeTimer();
+  const bus = createEventBus();
+  const ev = collect(bus);
+  const r = createReconciler({ bus, timer });
+
+  // No parent 'A' in the live set at all.
+  r.applyDispatchEvents('A', [
+    {
+      kind: 'dispatch:start',
+      toolUseId: 'toolu_orphan',
+      childAgent: 'route-adder',
+      description: 'Add a route',
+    },
+  ]);
+
+  assert.strictEqual(ev.filter((e) => e.type === 'enter').length, 0);
+  assert.strictEqual(
+    r.snapshot().liveAgents.find((e) => e.nodeId === 'sub::toolu_orphan'),
+    undefined
+  );
+});
+
+test('applyDispatchEvents drops a child whose parent is already winding down', () => {
+  const timer = makeFakeTimer();
+  const bus = createEventBus();
+  const ev = collect(bus);
+  const r = createReconciler({ bus, timer, lingerMs: 2500 });
+
+  r.applyDockerPoll({ available: true, containers: [A] });
+  // Parent A begins wind-down (exitScheduled = true) but is still in the map.
+  r.applyDockerPoll({ available: true, containers: [] });
+  ev.length = 0;
+
+  r.applyDispatchEvents('A', [
+    { kind: 'dispatch:start', toolUseId: 'toolu_late', childAgent: 'committer', description: 'commit' },
+  ]);
+
+  assert.strictEqual(ev.filter((e) => e.type === 'enter').length, 0);
+});
+
+test('two identical dispatch:start (same toolUseId) create only ONE child (idempotent)', () => {
+  const timer = makeFakeTimer();
+  const bus = createEventBus();
+  const ev = collect(bus);
+  const r = createReconciler({ bus, timer });
+
+  r.applyDockerPoll({ available: true, containers: [A] });
+  ev.length = 0;
+
+  const start = {
+    kind: 'dispatch:start',
+    toolUseId: 'toolu_dup',
+    childAgent: 'lint-runner',
+    description: 'run lint',
+  };
+  r.applyDispatchEvents('A', [start]);
+  r.applyDispatchEvents('A', [start]); // repeat — must be a no-op
+
+  const enters = ev.filter((e) => e.type === 'enter');
+  assert.strictEqual(enters.length, 1, 'second identical start is deduped');
+  const children = r
+    .snapshot()
+    .liveAgents.filter((e) => e.nodeId === 'sub::toolu_dup');
+  assert.strictEqual(children.length, 1);
+});
+
+// --- Tier-2 → Tier-3 inferred child wind-down triggers (T4, §4.2) ---------
+
+// Helper: bring up a live parent A and synth one inferred child under it.
+function spawnChild(r, ev, { toolUseId = 'toolu_T4', childAgent = 'test-writer' } = {}) {
+  r.applyDockerPoll({ available: true, containers: [A] });
+  r.applyDispatchEvents('A', [
+    { kind: 'dispatch:start', toolUseId, childAgent, description: 'do sub work' },
+  ]);
+  ev.length = 0;
+  return 'sub::' + toolUseId;
+}
+
+test('T4 trigger 1: a matching dispatch:end winds the inferred child down (completion)', () => {
+  const timer = makeFakeTimer();
+  const bus = createEventBus();
+  const ev = collect(bus);
+  const r = createReconciler({ bus, timer, lingerMs: 2500 });
+
+  const childId = spawnChild(r, ev, { toolUseId: 'toolu_end' });
+
+  r.applyDispatchEvents('A', [{ kind: 'dispatch:end', toolUseId: 'toolu_end' }]);
+
+  // Authoritative completion → exiting:done, then AGENT_EXIT after linger.
+  const upd = ev.filter((e) => e.type === 'update' && e.p.nodeId === childId);
+  assert.strictEqual(upd.length, 1);
+  assert.strictEqual(upd[0].p.state, 'exiting:done');
+
+  timer.advance(2600);
+  const exits = ev.filter((e) => e.type === 'exit' && e.p.nodeId === childId);
+  assert.strictEqual(exits.length, 1);
+  assert.strictEqual(exits[0].p.exitCode, 0);
+  assert.strictEqual(
+    r.snapshot().liveAgents.find((e) => e.nodeId === childId),
+    undefined
+  );
+});
+
+test('T4 trigger 1: a NON-matching dispatch:end is a no-op (different toolUseId)', () => {
+  const timer = makeFakeTimer();
+  const bus = createEventBus();
+  const ev = collect(bus);
+  const r = createReconciler({ bus, timer });
+
+  const childId = spawnChild(r, ev, { toolUseId: 'toolu_keep' });
+
+  r.applyDispatchEvents('A', [{ kind: 'dispatch:end', toolUseId: 'toolu_other' }]);
+
+  assert.strictEqual(ev.filter((e) => e.type === 'update').length, 0);
+  assert.strictEqual(ev.filter((e) => e.type === 'exit').length, 0);
+  const child = r.snapshot().liveAgents.find((e) => e.nodeId === childId);
+  assert.ok(child, 'unrelated end leaves the live child untouched');
+  assert.strictEqual(child.state, 'working');
+});
+
+test('T4 trigger 2: when the PARENT exits, its inferred children cascade-exit', () => {
+  const timer = makeFakeTimer();
+  const bus = createEventBus();
+  const ev = collect(bus);
+  const r = createReconciler({ bus, timer, lingerMs: 2500 });
+
+  // Live parent A + two inferred children under it.
+  r.applyDockerPoll({ available: true, containers: [A] });
+  r.applyDispatchEvents('A', [
+    { kind: 'dispatch:start', toolUseId: 'toolu_c1', childAgent: 'route-adder', description: 'r1' },
+    { kind: 'dispatch:start', toolUseId: 'toolu_c2', childAgent: 'committer', description: 'c2' },
+  ]);
+  ev.length = 0;
+
+  // Parent A leaves Docker → handleExit(A) cascades to both children.
+  r.applyDockerPoll({ available: true, containers: [] });
+
+  for (const cid of ['sub::toolu_c1', 'sub::toolu_c2']) {
+    const upd = ev.filter((e) => e.type === 'update' && e.p.nodeId === cid);
+    assert.strictEqual(upd.length, 1, `${cid} got a wind-down update`);
+    assert.ok(upd[0].p.state === 'exiting:done' || upd[0].p.state === 'exiting:errored');
+  }
+
+  timer.advance(2600);
+  // Parent and both children are gone after the linger.
+  assert.strictEqual(r.snapshot().liveAgents.length, 0);
+});
+
+test('T4 trigger 3: a child whose TTL lapses past subagentTtlMs is swept', () => {
+  const timer = makeFakeTimer();
+  const bus = createEventBus();
+  const ev = collect(bus);
+  const r = createReconciler({ bus, timer, lingerMs: 2500, subagentTtlMs: 90000 });
+
+  const childId = spawnChild(r, ev, { toolUseId: 'toolu_ttl' });
+
+  // No completion, no parent exit — let the stall guard fire.
+  timer.advance(90001);
+
+  const upd = ev.filter((e) => e.type === 'update' && e.p.nodeId === childId);
+  assert.strictEqual(upd.length, 1, 'TTL sweep winds the child down');
+  // Unknown-outcome exit colored as a clean finish.
+  assert.strictEqual(upd[0].p.state, 'exiting:done');
+
+  timer.advance(2600);
+  assert.strictEqual(
+    r.snapshot().liveAgents.find((e) => e.nodeId === childId),
+    undefined
+  );
+});
+
+test('T4 trigger 3: a child re-observed within TTL survives (lastSeen refresh)', () => {
+  const timer = makeFakeTimer();
+  const bus = createEventBus();
+  const ev = collect(bus);
+  const r = createReconciler({ bus, timer, lingerMs: 2500, subagentTtlMs: 90000 });
+
+  const childId = spawnChild(r, ev, { toolUseId: 'toolu_fresh' });
+
+  // Re-observe (repeated start) at 60s — refreshes lastSeen.
+  timer.advance(60000);
+  r.applyDispatchEvents('A', [
+    { kind: 'dispatch:start', toolUseId: 'toolu_fresh', childAgent: 'test-writer', description: 'again' },
+  ]);
+
+  // Original 90s deadline elapses, but lastSeen was bumped → child must survive.
+  timer.advance(30001); // now at 90.001s total, only 30s since refresh
+  assert.ok(
+    r.snapshot().liveAgents.find((e) => e.nodeId === childId),
+    'child re-observed within TTL is not swept early'
+  );
+
+  // Now let the refreshed window fully lapse → swept.
+  timer.advance(60000); // 90s since the refresh
+  assert.strictEqual(
+    r.snapshot().liveAgents.find((e) => e.nodeId === childId) &&
+      r.snapshot().liveAgents.find((e) => e.nodeId === childId).state,
+    'exiting:done'
+  );
+});
+
+test('T4 idempotency: dispatch:end then TTL (and double end) never double-exit', () => {
+  const timer = makeFakeTimer();
+  const bus = createEventBus();
+  const ev = collect(bus);
+  const r = createReconciler({ bus, timer, lingerMs: 2500, subagentTtlMs: 90000 });
+
+  const childId = spawnChild(r, ev, { toolUseId: 'toolu_idem' });
+
+  // First end winds it down.
+  r.applyDispatchEvents('A', [{ kind: 'dispatch:end', toolUseId: 'toolu_idem' }]);
+  // A duplicate end + a parent cascade + a TTL lapse must all be harmless no-ops.
+  r.applyDispatchEvents('A', [{ kind: 'dispatch:end', toolUseId: 'toolu_idem' }]);
+  r.applyDockerPoll({ available: true, containers: [] }); // parent A exits too
+  timer.advance(95000); // TTL window would have lapsed
+
+  const childUpdates = ev.filter((e) => e.type === 'update' && e.p.nodeId === childId);
+  assert.strictEqual(childUpdates.length, 1, 'exactly one wind-down update for the child');
+  const childExits = ev.filter((e) => e.type === 'exit' && e.p.nodeId === childId);
+  assert.strictEqual(childExits.length, 1, 'exactly one AGENT_EXIT for the child');
+});
+
 test('applyDockerLogActivity advances a dispatching node to working without a log event', () => {
   const timer = makeFakeTimer();
   const bus = createEventBus();

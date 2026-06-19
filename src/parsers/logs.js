@@ -63,6 +63,82 @@ function collectTextBlobs(line) {
   return blobs;
 }
 
+// True iff a tool_use `name` denotes a sub-agent dispatch. The verified primary
+// path is the Agent-SDK `Agent` tool; `Task` is its alias; the MCP variant's
+// name ends with `run_agent_in_docker` (e.g. mcp__project-voltron__run_agent_in_docker).
+function isDispatchToolName(name) {
+  if (typeof name !== 'string' || name.length === 0) return false;
+  return name === 'Agent' || name === 'Task' || /run_agent_in_docker/.test(name);
+}
+
+// Normalize a child-agent slug: trim + lower-case so it joins cleanly to the
+// tier map / frontend. Returns '' for any non-string / empty input.
+function normalizeChildAgent(value) {
+  if (typeof value !== 'string') return '';
+  return value.trim().toLowerCase();
+}
+
+// Derive a short task label for a dispatch start from its tool_use `input`:
+// prefer `description`, then `task`, then the first ~80 chars of `prompt`.
+function deriveDispatchTask(input) {
+  if (!input || typeof input !== 'object') return null;
+  if (typeof input.description === 'string' && input.description.trim()) {
+    return input.description.trim();
+  }
+  if (typeof input.task === 'string' && input.task.trim()) {
+    return input.task.trim();
+  }
+  if (typeof input.prompt === 'string' && input.prompt.trim()) {
+    return input.prompt.trim().slice(0, 80);
+  }
+  return null;
+}
+
+// Walk a single stream-JSON line's `message.content[]` for STRUCTURED dispatch
+// signals ONLY — never prose. Emits, in document order:
+//   { kind: 'dispatch:start', toolUseId, childAgent, description }
+//     ← an assistant `tool_use` block whose name is Agent/Task/…run_agent_in_docker
+//       AND that carries a child-agent id (input.subagent_type | input.agent_name |
+//       input.agent_type) AND a tool_use id.
+//   { kind: 'dispatch:end', toolUseId }
+//     ← a `tool_result` block with a non-empty tool_use_id.
+// This is the false-positive firewall (design §2.1): `text` blocks, the word
+// "dispatch" in prose, and non-dispatch tools (Bash/Read/Edit/…) yield NOTHING.
+// Tolerates malformed/partial JSON (returns []) and never throws.
+function collectDispatchMarkers(line) {
+  let obj;
+  try {
+    obj = JSON.parse(line);
+  } catch {
+    return [];
+  }
+  const content = obj && obj.message && obj.message.content;
+  if (!Array.isArray(content)) return [];
+  const markers = [];
+  for (const part of content) {
+    if (!part || typeof part !== 'object') continue;
+    if (part.type === 'tool_use') {
+      if (!isDispatchToolName(part.name)) continue;
+      if (typeof part.id !== 'string' || part.id.length === 0) continue;
+      const input = part.input || {};
+      const childAgent = normalizeChildAgent(
+        input.subagent_type || input.agent_name || input.agent_type
+      );
+      if (!childAgent) continue;
+      markers.push({
+        kind: 'dispatch:start',
+        toolUseId: part.id,
+        childAgent,
+        description: deriveDispatchTask(input),
+      });
+    } else if (part.type === 'tool_result') {
+      if (typeof part.tool_use_id !== 'string' || part.tool_use_id.length === 0) continue;
+      markers.push({ kind: 'dispatch:end', toolUseId: part.tool_use_id });
+    }
+  }
+  return markers;
+}
+
 // Scan a stream-JSON line's assistant text for embedded [STEP N]/[DONE] markers
 // and replay them, in document order, through the same recorders the
 // line-anchored path uses. Never throws.
@@ -111,6 +187,11 @@ function parseLog(content, filename) {
   let execTs = null;
   let stepNum = null;
   const steps = [];
+  // Additive, purely structural: dispatch:start/dispatch:end markers mined from
+  // stream-JSON tool_use/tool_result blocks (NEVER from prose). The reconciler
+  // pairs start↔end across tail chunks; the parser only reports raw markers in
+  // document order. See collectDispatchMarkers + design §2.1.
+  const dispatches = [];
 
   // Shared step/done recorders so the line-anchored path and the stream-JSON
   // path produce identical { stepNum, text } shapes and latestStep updates.
@@ -142,6 +223,9 @@ function parseLog(content, filename) {
     // [STEP N]/[DONE] markers. Malformed/partial JSON is skipped, never thrown.
     if (c0 === 123 /* '{' */) {
       extractJsonMarkers(line, pushStep, pushDone);
+      for (const marker of collectDispatchMarkers(line)) {
+        dispatches.push(marker);
+      }
       continue;
     }
 
@@ -167,7 +251,7 @@ function parseLog(content, filename) {
     latestStep = defaultLabel(state, exitCode);
   }
 
-  return { nodeId, agent, state, exitCode, latestStep, stepNum, execTs, steps, containerName };
+  return { nodeId, agent, state, exitCode, latestStep, stepNum, execTs, steps, containerName, dispatches };
 }
 
 // Read only the bytes appended since `fromOffset`, parse them, and return the

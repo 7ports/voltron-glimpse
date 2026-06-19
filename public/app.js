@@ -52,6 +52,7 @@
   var TIER_CLASSES = ['tier1', 'tier2', 'tier3'];
 
   var LABEL_STEP_MAX = 28;        // truncate the [STEP] line in node labels
+  var SUBAGENT_FANOUT_MAX = 6;    // T7: per-parent inferred-child display cap; excess collapsed into a "+N" pill
   var RELAYOUT_DEBOUNCE_MS = 200; // §4.5: settle a dispatch burst into one reflow
   var LAYOUT_ANIM_MS = 400;       // §4.5: glide, don't snap
 
@@ -66,6 +67,7 @@
   var DISPATCH_FLASH_MS = 1000;
   var DISPATCH_FLASH_COLOR = '#00e5ff';
   var DISPATCH_DASH_COLOR = '#2196f3';
+  var SUBDISPATCH_COLOR = '#9c6ade'; // §6.2 violet for inferred Tier-2→Tier-3 edges
 
   /* ──────────────────────────────────────────────────────────────────────
    * Pod tracking — deterministic hue, registry, legend
@@ -171,6 +173,7 @@
       if (entry) upsertNode(entry);
     });
     setEdges(edges);
+    updateFanoutCaps(); // T7: recreate pill nodes cleared by cy.elements().remove()
   }
 
   /* ──────────────────────────────────────────────────────────────────────
@@ -355,6 +358,8 @@
 
   var liveAgents = {};   // nodeId -> live agent entry
   var edges = [];        // [{ id, source, target, kind, inferred }]
+  var fanoutPills = {};  // T7: parentNodeId -> pillNodeId (active "+N" pill nodes)
+  var expandedPillParents = {}; // T7: parentNodeId -> true (user clicked to expand, skip auto-collapse)
   var dockerAvailable;   // boolean | undefined (unknown until first message)
   var hubState = null;   // hub payload from backend: { id, state:'active'|'idle', label, kind, … } or null
   var pinnedNodeId = null; // nodeId of the click-pinned detail panel; null when closed
@@ -408,12 +413,17 @@
   }
 
   // Label: "<agent>\n<truncated [STEP]>" — or "<agent>\n<state>" when no step.
+  // For inferred sub-agents with no step output, shows the dispatch description.
   // Never renders the literal "undefined".
   function nodeLabel(entry) {
     var agent = (entry && entry.agent) || (entry && entry.nodeId) || 'agent';
     var step = entry && entry.step;
     if (typeof step === 'string' && step.length) {
       return agent + '\n' + truncate(step, LABEL_STEP_MAX);
+    }
+    // Inferred children have no [STEP] lines; show the dispatch description instead.
+    if (entry && entry.inferred && typeof entry.dispatchTaskText === 'string' && entry.dispatchTaskText.trim()) {
+      return agent + '\n' + truncate(entry.dispatchTaskText.trim(), LABEL_STEP_MAX);
     }
     var state = (entry && entry.state) ? String(entry.state) : '';
     return state ? agent + '\n' + state : agent;
@@ -447,12 +457,19 @@
       elements: [],
     });
 
+    // T7: click a pill node → expand all hidden children and remove the pill.
+    cy.on('tap', 'node.pill-node', function (evt) {
+      expandFanoutPill(evt.target);
+    });
+
     // Click a node → press feedback (scale dip + spring back) + tooltip.
     cy.on('tap', 'node', function (evt) {
       var node = evt.target;
+      if (node.hasClass('pill-node')) return; // handled by dedicated pill handler above
       if (!node.hasClass('node-entering') && !node.hasClass('node-exiting')) {
         var tier = node.data('tier') || 3;
-        var baseW = tier === 1 ? 64 : (tier === 2 ? 44 : 28);
+        var isInferred = node.hasClass('inferred-agent');
+        var baseW = tier === 1 ? 64 : (tier === 2 ? 44 : (isInferred ? 20 : 28));
         node.stop(true);
         node.animate({
           style: { 'width': baseW * 0.88, 'height': baseW * 0.88 },
@@ -530,6 +547,108 @@
     });
   }
 
+  // T7 — Fan-out cap: when a Tier-2 parent has more than SUBAGENT_FANOUT_MAX inferred
+  // children, render the first N and collapse the rest into a "+N" pill node attached
+  // to that parent. Display-only — liveAgents still holds all entries. console-note
+  // on collapse ("no silent caps" principle). Call after any inferred enter/exit/snapshot.
+  function updateFanoutCaps() {
+    if (!cy) return;
+
+    // Group live inferred children by parentNodeId.
+    var childrenByParent = {};
+    Object.keys(liveAgents).forEach(function (id) {
+      var entry = liveAgents[id];
+      if (entry && entry.inferred === true && entry.parentNodeId) {
+        var pid = entry.parentNodeId;
+        if (!childrenByParent[pid]) childrenByParent[pid] = [];
+        childrenByParent[pid].push(id);
+      }
+    });
+
+    // Reconcile existing pills: remove any whose parent no longer exceeds the cap.
+    Object.keys(fanoutPills).forEach(function (parentId) {
+      var children = childrenByParent[parentId] || [];
+      if (children.length <= SUBAGENT_FANOUT_MAX) {
+        var pillId = fanoutPills[parentId];
+        var pillEle = cy.getElementById(pillId);
+        if (pillEle.nonempty()) pillEle.remove();
+        delete fanoutPills[parentId];
+        delete expandedPillParents[parentId];
+        // Restore visibility of any still-collapsed children.
+        children.forEach(function (childId) {
+          var ele = cy.getElementById(childId);
+          if (ele.nonempty() && ele.style('display') === 'none') ele.style('display', 'element');
+        });
+      }
+    });
+
+    // Apply cap for each parent that exceeds SUBAGENT_FANOUT_MAX.
+    Object.keys(childrenByParent).forEach(function (parentId) {
+      var children = childrenByParent[parentId];
+      if (children.length <= SUBAGENT_FANOUT_MAX) return;
+      if (expandedPillParents[parentId]) return; // user expanded; don't re-collapse
+
+      var hidden = children.length - SUBAGENT_FANOUT_MAX;
+      var pillId = 'fanout-pill::' + parentId;
+
+      // Show first SUBAGENT_FANOUT_MAX, hide the rest (display:none also hides connected edges).
+      children.forEach(function (childId, idx) {
+        var ele = cy.getElementById(childId);
+        if (ele.nonempty()) ele.style('display', idx < SUBAGENT_FANOUT_MAX ? 'element' : 'none');
+      });
+
+      // Create or update the pill node.
+      var existingPill = cy.getElementById(pillId);
+      if (existingPill.nonempty()) {
+        existingPill.data('label', '+' + hidden);
+      } else {
+        console.log('[Glimpse] Fan-out cap: ' + children.length + ' inferred children under "' +
+          parentId + '" — collapsing ' + hidden + ' into "+' + hidden +
+          '" pill (SUBAGENT_FANOUT_MAX=' + SUBAGENT_FANOUT_MAX + ')');
+        var parentEle = cy.getElementById(parentId);
+        var pillData = { id: pillId, label: '+' + hidden };
+        if (podBoxMode && parentEle.nonempty()) {
+          var podKey = parentEle.data('podKey');
+          if (podKey) pillData.parent = compoundParentId(podKey);
+        }
+        cy.add({ group: 'nodes', data: pillData, classes: 'pill-node' });
+        if (parentEle.nonempty()) {
+          cy.add({
+            group: 'edges',
+            data: { id: parentId + '->' + pillId, source: parentId, target: pillId },
+            classes: 'subdispatch',
+          });
+        }
+        fanoutPills[parentId] = pillId;
+        scheduleLayout();
+      }
+    });
+  }
+
+  // T7 — Expand a pill node: show all hidden children of its parent, remove the pill.
+  // Marks the parent as expanded so updateFanoutCaps won't re-collapse it until the
+  // child count falls back to ≤ SUBAGENT_FANOUT_MAX.
+  function expandFanoutPill(pillNode) {
+    if (!pillNode || pillNode.empty()) return;
+    var pillId = pillNode.id();
+    var parentId = null;
+    Object.keys(fanoutPills).forEach(function (pid) {
+      if (fanoutPills[pid] === pillId) parentId = pid;
+    });
+    if (!parentId) return;
+    Object.keys(liveAgents).forEach(function (id) {
+      var entry = liveAgents[id];
+      if (entry && entry.inferred && entry.parentNodeId === parentId) {
+        var ele = cy.getElementById(id);
+        if (ele.nonempty()) ele.style('display', 'element');
+      }
+    });
+    expandedPillParents[parentId] = true;
+    pillNode.remove();
+    delete fanoutPills[parentId];
+    scheduleLayout();
+  }
+
   // Create or update a single live-agent node from its entry. Returns true when
   // the node was newly added (i.e. the node set changed → caller relayouts).
   function upsertNode(entry) {
@@ -586,6 +705,15 @@
       ele.addClass(stateClass(entry.state));
     }
 
+    // Inferred-agent (§6.1): ghosted/dashed visual for synthesized Tier-3 nodes.
+    // Store parentNodeId on node data so entrance/exit animations can find the spoke.
+    if (entry.inferred === true) {
+      ele.addClass('inferred-agent');
+      if (entry.parentNodeId != null) ele.data('parentNodeId', entry.parentNodeId);
+    } else {
+      ele.removeClass('inferred-agent');
+    }
+
     // Pod accent — border ring in the pod's hue; status fill is unchanged.
     // (registerPod already called at top of upsertNode before cy.add())
     if (entry.podKey) {
@@ -614,8 +742,11 @@
     edges.forEach(function (e) {
       if (!e || !e.source || !e.target) return;
       var src = e.source;
-      // Remap global hub to pod-specific hub in multi-pod mode.
-      if (multiPodMode && src === HUB_ID) {
+      var edgeKind = e.kind || 'dispatch';
+      // Sub-dispatch edges (Tier-2→inferred Tier-3) use their literal source node —
+      // never remapped to the hub (the hub is not involved in this relationship).
+      // Hub dispatch edges are remapped pod-specifically in multi-pod mode.
+      if (edgeKind !== 'subdispatch' && multiPodMode && src === HUB_ID) {
         var targetEntry = liveAgents[e.target];
         var targetPodKey = targetEntry && (targetEntry.podKey || null);
         src = hubIdForPod(targetPodKey);
@@ -628,16 +759,34 @@
       cy.add({
         group: 'edges',
         data: { id: id, source: src, target: e.target },
-        classes: 'dispatch',
+        classes: edgeKind === 'subdispatch' ? 'subdispatch' : 'dispatch',
       });
     });
   }
 
-  // Optimistic hub + single spoke for a freshly-entered agent, so the node is
-  // wired even before the authoritative edge:update lands.
+  // Optimistic spoke for a freshly-entered agent, so the node is wired even
+  // before the authoritative edge:update lands. Inferred children (no container)
+  // wire to their parent node; real agents wire to the pod-scoped hub.
   function ensureSpoke(targetId) {
     if (!cy) return;
     var entry = liveAgents[targetId];
+
+    // Inferred children attach to their parent agent, not the hub (§6.3).
+    if (entry && entry.inferred && entry.parentNodeId) {
+      var pid = entry.parentNodeId;
+      if (cy.getElementById(pid).empty()) return; // parent not yet rendered
+      var subId = pid + '->' + targetId;
+      if (cy.getElementById(subId).nonempty()) return;
+      if (cy.getElementById(targetId).empty()) return;
+      cy.add({
+        group: 'edges',
+        data: { id: subId, source: pid, target: targetId },
+        classes: 'subdispatch',
+      });
+      return;
+    }
+
+    // Real agents: hub spoke (existing behavior).
     var podKey = entry && (entry.podKey || null);
     var hid = hubIdForPod(podKey);
     if (podBoxMode && podKey) {
@@ -846,6 +995,34 @@
       }
     });
 
+    // ── §6.2 Sub-dispatch flow — violet marching-ants while child working ──
+    cy.edges('.subdispatch').forEach(function (edge) {
+      var targetId = edge.data('target');
+      var target = cy.getElementById(targetId);
+      var flowing = target.nonempty() &&
+                    target.hasClass('working') &&
+                    !target.hasClass('node-exiting');
+      if (flowing) {
+        edge.style({
+          'line-dash-offset':   -edgeFlowAccum,
+          'opacity':             0.75,
+          'line-color':          SUBDISPATCH_COLOR,
+          'target-arrow-color':  SUBDISPATCH_COLOR,
+          'width':               1.6,
+        });
+        if (!edge.hasClass('active')) edge.addClass('active');
+      } else if (edge.hasClass('active')) {
+        edge.removeClass('active');
+        edge.style({
+          'line-dash-offset':    0,
+          'opacity':             0.40,
+          'line-color':          SUBDISPATCH_COLOR,
+          'target-arrow-color':  SUBDISPATCH_COLOR,
+          'width':               1.2,
+        });
+      }
+    });
+
     // ── §3.4 Hub active pulse — slow cyan halo, distinct from working ─────
     cy.nodes('.hub.hub-active').forEach(function (node) {
       var sin = 0.5 + 0.5 * Math.sin((ts / HUB_PULSE_PERIOD_MS) * 2 * Math.PI);
@@ -872,7 +1049,8 @@
   function animateNodeEntrance(ele) {
     if (!ele || ele.empty()) return;
     var tier = ele.data('tier') || 3;
-    var targetW = tier === 1 ? 64 : (tier === 2 ? 44 : 28);
+    var isInferred = ele.hasClass('inferred-agent');
+    var targetW = tier === 1 ? 64 : (tier === 2 ? 44 : (isInferred ? 20 : 28)); // T7: inferred children one step smaller
 
     ele.addClass('node-entering');
     ele.style({
@@ -912,9 +1090,11 @@
       },
     });
 
-    // Spoke fades in alongside the node (pod-aware hub lookup).
-    var nodePodKey = ele.data('podKey');
-    var spoke = cy.getElementById(hubIdForPod(nodePodKey) + '->' + ele.id());
+    // Spoke fades in alongside the node. Inferred children use the parent→child
+    // subdispatch spoke; real agents use the pod-scoped hub→agent spoke (§6.3).
+    var nodeParentId = ele.data('parentNodeId');
+    var spokeSrcId = nodeParentId ? nodeParentId : hubIdForPod(ele.data('podKey'));
+    var spoke = cy.getElementById(spokeSrcId + '->' + ele.id());
     if (spoke.nonempty()) {
       spoke.style({ 'opacity': 0 });
       spoke.animate({ style: { 'opacity': 0.45 }, duration: 500, easing: 'ease-in-out' });
@@ -928,6 +1108,7 @@
     var ele = cy.getElementById(nodeId);
     if (ele.empty()) { removeHubIfOrphan(); scheduleLayout(); return; }
 
+    var isInferredNode = ele.hasClass('inferred-agent'); // T7: capture before any class changes
     var isError = typeof exitCode === 'number' && exitCode !== 0;
     var flashColor = isError ? '#f44336' : '#00e676';
     // After 300 ms flash + 600 ms scale = 900 ms elapsed; wait lingerAfterScale
@@ -940,8 +1121,9 @@
     ele.addClass(isError ? 'exiting-errored' : 'exiting-done');
 
     // Stop spoke flow immediately; tint it to match the terminal colour.
-    var exitPodKey = ele.data('podKey');
-    var exitHubId = hubIdForPod(exitPodKey);
+    // Inferred children use the parent→child spoke id; real agents use the hub.
+    var exitParentId = ele.data('parentNodeId');
+    var exitHubId = exitParentId ? exitParentId : hubIdForPod(ele.data('podKey'));
     var spoke = cy.getElementById(exitHubId + '->' + nodeId);
     if (spoke.nonempty()) {
       if (spoke.hasClass('active')) spoke.removeClass('active');
@@ -968,7 +1150,7 @@
           complete: function () {
             // 2. Scale-down + fade ~600 ms.
             var tier = ele.data('tier') || 3;
-            var baseW = tier === 1 ? 64 : (tier === 2 ? 44 : 28);
+            var baseW = tier === 1 ? 64 : (tier === 2 ? 44 : (isInferredNode ? 20 : 28)); // T7: inferred nodes are 20px
             ele.animate({
               style: { 'opacity': 0, 'width': baseW * 0.25, 'height': baseW * 0.25 },
               duration: 600,
@@ -1054,7 +1236,9 @@
     if (task.source === 'dispatch') {
       var caption = document.createElement('div');
       caption.className = 'current-task-caption';
-      caption.textContent = 'inferred from journal';
+      caption.textContent = (entry && entry.inferred === true)
+        ? 'inferred from parent dispatch'
+        : 'inferred from journal';
       section.appendChild(caption);
     }
     return section;
@@ -1280,9 +1464,13 @@
   }
 
   // Build the agent meta grid (container / dispatch time / step / state / exit).
+  // For inferred children, prepends a "Backed by" honesty row (§6.1).
   function buildAgentMeta(entry) {
     var grid = document.createElement('div');
     grid.className = 'tooltip-meta';
+    if (entry.inferred === true) {
+      appendMetaRow(grid, 'Backed by', 'inferred (no container)');
+    }
     appendMetaRow(grid, 'Container', entry.containerName);
     appendMetaRow(grid, 'Dispatched', entry.createdAt);
     appendMetaRow(grid, 'Step', entry.step);
@@ -1452,6 +1640,8 @@
     state = state || {};
     liveAgents = {};
     edges = [];
+    fanoutPills = {};           // T7: reset pill tracking on full snapshot
+    expandedPillParents = {};   // T7: reset expansion state
     podRegistry = {}; // full reset — snapshot is authoritative
     podBoxMode = false;
     multiPodMode = false;
@@ -1508,6 +1698,7 @@
       }
     }
 
+    updateFanoutCaps(); // T7: apply display cap after all nodes/edges are restored
     if (layoutTimer) { clearTimeout(layoutTimer); layoutTimer = null; }
     updatePodLegend();
     runLayout();
@@ -1532,6 +1723,7 @@
       flashDispatchSpoke(p.nodeId); // §3.5 — correlated launch flash
     }
     updatePodLegend();
+    updateFanoutCaps(); // T7: apply/update fan-out cap after new agent arrives
     scheduleLayout();
   }
 
@@ -1559,6 +1751,7 @@
     }
     delete liveAgents[p.nodeId]; // remove from live set immediately
     updatePodLegend(); // pod may have no more live agents
+    updateFanoutCaps(); // T7: update cap (may remove pill or restore hidden children)
     animateNodeExit(p.nodeId, exitCode); // §4.4 — node removal is deferred ~2.5 s
     refreshPinnedPanel(p.nodeId); // swap to terminal chip + freeze clock if pinned
     // scheduleLayout() is called inside animateNodeExit after the linger window
