@@ -1,6 +1,6 @@
 {
   "name": "voltron-glimpse",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "Real-time, read-only visualizer companion for Project Voltron agent runs.",
   "license": "MIT",
   "author": "RAJESH PUJARA <rapajara@gmail.com>",
