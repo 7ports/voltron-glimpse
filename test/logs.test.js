@@ -157,6 +157,96 @@ test('parseLog: unnumbered [STEP] yields stepNum === null', () => {
   assert.strictEqual(p.stepNum, null);
 });
 
+test('parseLog: stream-JSON log mines embedded [STEP N]/[DONE] markers from JSON text', () => {
+  // Real production logs are stream-JSON: each line is a JSON event and the
+  // agent's [STEP N]/[DONE] markers live INSIDE assistant-message text fields
+  // (often backtick-wrapped), never at line-start. The old parser dropped any
+  // line whose first char wasn't '[', so steps[] stayed empty in production.
+  const file = 'agent-stream-json.log';
+  const content = fs.readFileSync(path.join(__dirname, 'fixtures', file), 'utf8');
+  const p = parseLog(content, file);
+  assert.ok(p, 'should return a payload');
+
+  const stepEntries = p.steps.filter((s) => /^\[STEP /.test(s.text));
+  assert.ok(stepEntries.length >= 1, 'must parse >=1 [STEP N] from stream-JSON text');
+  assert.ok(
+    stepEntries.some((s) => s.stepNum === 1),
+    'embedded "[STEP 1] ..." should yield stepNum === 1'
+  );
+
+  // The embedded [DONE] marker is captured too, and the [exit] line still works.
+  assert.ok(
+    p.steps.some((s) => /^\[DONE\]/.test(s.text)),
+    'embedded [DONE] marker should be captured'
+  );
+  assert.strictEqual(p.exitCode, 0);
+  assert.strictEqual(p.state, 'done');
+});
+
+// Helper: wrap a free-text blob as a single stream-JSON assistant line so the
+// embedded-marker path (extractJsonMarkers) exercises it.
+function jsonTextLine(text) {
+  return JSON.stringify({ message: { content: [{ type: 'text', text }] } });
+}
+
+test('parseLog: embedded [STEP N] description survives all three markdown wraps', () => {
+  // 1. bare  2. whole-marker inline-code  3. token-only inline-code (the bug)
+  const shapes = [
+    { text: '[STEP 1] Stage the files', expected: '[STEP 1] Stage the files' },
+    { text: '`[STEP 1] Stage the files`', expected: '[STEP 1] Stage the files' },
+    { text: '`[STEP 2]` read the reconciler', expected: '[STEP 2] read the reconciler' },
+  ];
+  for (const { text, expected } of shapes) {
+    const p = parseLog(jsonTextLine(text) + '\n', 'foo-2026-01-01T00-00-00.log');
+    assert.ok(p, `payload for shape: ${text}`);
+    assert.strictEqual(p.steps.length, 1, `exactly one step for shape: ${text}`);
+    assert.strictEqual(
+      p.steps[0].text,
+      expected,
+      `description must match for shape: ${text}`
+    );
+    // The broken case used to capture empty — assert prose is present.
+    assert.ok(
+      !/^\[STEP \d+\]$/.test(p.steps[0].text),
+      `description must NOT be empty for shape: ${text}`
+    );
+  }
+});
+
+test('parseLog: token-only-wrapped [STEP] without a number keeps its prose', () => {
+  const p = parseLog(
+    jsonTextLine('`[STEP]` read the reconciler') + '\n',
+    'foo-2026-01-01T00-00-00.log'
+  );
+  assert.ok(p);
+  assert.strictEqual(p.steps.length, 1);
+  assert.strictEqual(p.steps[0].text, '[STEP] read the reconciler');
+  assert.strictEqual(p.steps[0].stepNum, null);
+});
+
+test('parseLog: embedded [DONE] summary survives all three markdown wraps', () => {
+  const shapes = [
+    { text: '[DONE] fixed the parser', expected: '[DONE] fixed the parser' },
+    { text: '`[DONE] fixed the parser`', expected: '[DONE] fixed the parser' },
+    { text: '`[DONE]` fixed the parser', expected: '[DONE] fixed the parser' },
+  ];
+  for (const { text, expected } of shapes) {
+    const p = parseLog(jsonTextLine(text) + '\n', 'foo-2026-01-01T00-00-00.log');
+    assert.ok(p, `payload for shape: ${text}`);
+    const done = p.steps.filter((s) => /^\[DONE\]/.test(s.text));
+    assert.strictEqual(done.length, 1, `exactly one [DONE] for shape: ${text}`);
+    assert.strictEqual(done[0].text, expected, `summary must match for shape: ${text}`);
+  }
+});
+
+test('parseLog: a genuinely bare embedded [STEP 3] (no prose) stays number-only', () => {
+  const p = parseLog(jsonTextLine('[STEP 3]') + '\n', 'foo-2026-01-01T00-00-00.log');
+  assert.ok(p);
+  assert.strictEqual(p.steps.length, 1);
+  assert.strictEqual(p.steps[0].text, '[STEP 3]');
+  assert.strictEqual(p.steps[0].stepNum, 3);
+});
+
 test('parseLog: a chunk with two step lines returns both in order', () => {
   const content = '[STEP 1] first\n[STEP 2] second\n';
   const p = parseLog(content, 'foo-2026-01-01T00-00-00.log');

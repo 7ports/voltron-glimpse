@@ -354,6 +354,10 @@ html, body {
   border-top: 2px dashed var(--color-text-dim);
 }
 
+.legend-edge.edge-subdispatch {
+  border-top: 2px dashed #9c6ade;
+}
+
 /* =============================================================
    Pod legend (per-pod hue swatch + 'you' marker)
    Shown only when 2+ pods are live; app.js controls visibility.

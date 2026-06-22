@@ -64,6 +64,11 @@ function createReconciler({
   freshnessMs = 15000,
   hubFreshnessMs = 60000,
   dispatchWindowMs = 10000,
+  // §4.2 trigger 3: an inferred Tier-3 child has no container-exit signal, so a
+  // stall guard sweeps any child whose `lastSeen` has gone older than this window
+  // without a completion or a parent-exit. 90 s is comfortably longer than a typical
+  // micro-agent runtime yet short enough that a leaked node never lingers visibly.
+  subagentTtlMs = 90000,
   timer,
 } = {}) {
   if (!bus || typeof bus.emit !== 'function') {
@@ -152,6 +157,12 @@ function createReconciler({
       recentSteps: Array.isArray(e.recentSteps) ? e.recentSteps.slice() : [],
       dispatchTaskText: e.dispatchTaskText != null ? e.dispatchTaskText : null,
       doneSummary: e.doneSummary != null ? e.doneSummary : null,
+      // §3.4 inferred-child pass-through. Container-backed real agents leave
+      // parentNodeId null and inferred false, so their payloads are byte-for-byte
+      // unchanged (back-compat); only synthesized Tier-3 children flip these.
+      parentNodeId: e.parentNodeId != null ? e.parentNodeId : null,
+      inferred: e.inferred === true,
+      containerBacked: e.containerBacked !== false,
     };
   }
 
@@ -188,6 +199,12 @@ function createReconciler({
     if (entry.exitScheduled) return;
     entry.exitScheduled = true;
     entry.exitCode = exitCode;
+    // An inferred child's TTL stall-guard is now moot — it is winding down via an
+    // authoritative trigger. Cancel it so no late sweep fires against a dead id.
+    if (entry.ttlTimer) {
+      clock.clearTimeout(entry.ttlTimer);
+      entry.ttlTimer = null;
+    }
     const errored = exitCode !== null && exitCode !== undefined && exitCode !== 0;
     entry.state = errored ? 'exiting:errored' : 'exiting:done';
     bus.emit(EVENTS.AGENT_UPDATE, {
@@ -208,6 +225,19 @@ function createReconciler({
       bus.emit(EVENTS.AGENT_EXIT, { nodeId, exitCode });
       recomputeEdges();
     }, linger);
+
+    // §4.2 trigger 2: parent-exit cascade. An inferred Tier-3 child ran INSIDE this
+    // node's process and has no container of its own — once the parent winds down,
+    // any still-"open" child is stale by definition, so cascade-exit every child
+    // hanging off it. Container nodes leave `parentNodeId` null and never match, so
+    // this only ever fires for inferred children. Idempotent: a child already
+    // winding down early-returns; children have no children, so no deep recursion.
+    // Mutating only entry fields (not map keys) here, so iterating live is safe.
+    for (const [childId, child] of liveAgents) {
+      if (child.parentNodeId === nodeId && !child.exitScheduled) {
+        handleExit(childId, null);
+      }
+    }
   }
 
   // Authoritative membership. A single available:false poll is treated as
@@ -381,6 +411,107 @@ function createReconciler({
     }
   }
 
+  // §3.4 Tier-2 → Tier-3 dispatch inference. A sub-manager performs its Tier-3
+  // work in its own container/log — no child container or child log file exists —
+  // so the only on-disk trace of a dispatch is a structured `Agent`/`run_agent_in_docker`
+  // tool_use in the PARENT's stream-JSON log (parsed into `dispatches[]` by
+  // src/parsers/logs.js). This synthesizes the inferred child node from that signal.
+  //
+  // T3 scope: synth-on-start + dedup + node-enter only. The wind-down triggers
+  // (dispatch:end completion, parent-exit cascade, TTL sweep — §4.2) are T4; the
+  // child→parent map and `lastSeen`/`exitScheduled` fields below are deliberately
+  // populated now so T4 can hook those triggers in with minimal change.
+  // §4.2 trigger 3: arm (or re-arm) the TTL stall-guard for an inferred child.
+  // Fires once `lastSeen` has aged past `subagentTtlMs`; if the child was
+  // re-observed in the meantime (§4.3 refresh), it reschedules for the remaining
+  // window instead of exiting, so a still-active child survives. Uses the injectable
+  // clock so a fake timer can drive it deterministically in tests.
+  function scheduleSubagentTtlSweep(id, delay) {
+    const entry = liveAgents.get(id);
+    if (!entry) return;
+    entry.ttlTimer = clock.setTimeout(() => {
+      const e = liveAgents.get(id);
+      if (!e || e.exitScheduled) return;
+      const elapsed = clock.now() - e.lastSeen;
+      if (elapsed >= subagentTtlMs) {
+        // Unknown-outcome exit (like a Docker drop with no [exit]): colored clean.
+        handleExit(id, null);
+      } else {
+        scheduleSubagentTtlSweep(id, subagentTtlMs - elapsed);
+      }
+    }, delay);
+  }
+
+  function applyDispatchEvents(parentNodeId, dispatches) {
+    const list = Array.isArray(dispatches) ? dispatches : [];
+    const parent = liveAgents.get(parentNodeId);
+    let membershipChanged = false;
+
+    for (const d of list) {
+      if (!d) continue;
+      if (d.kind === 'dispatch:start') {
+        if (!d.toolUseId) continue;
+        // §3.3 honesty gate: only admit a child whose parent is a currently-live,
+        // not-yet-winding-down node. An orphan (parent unknown or already exited)
+        // is silently DROPPED — never hub-attached — because attaching it would
+        // assert a dispatch relationship we cannot honestly claim.
+        if (!parent || parent.exitScheduled) continue;
+        const id = 'sub::' + d.toolUseId;
+        if (liveAgents.has(id)) {
+          // §4.3 refresh: a repeated start for an already-live child (defensive —
+          // ids are unique) just bumps `lastSeen` so the TTL sweep stays deferred.
+          const existing = liveAgents.get(id);
+          if (existing && !existing.exitScheduled) existing.lastSeen = clock.now();
+          continue; // dedup: idempotent per toolUseId
+        }
+        const entry = {
+          nodeId: id,
+          agent: normalizeAgent(d.childAgent) || d.childAgent || null,
+          containerName: null,
+          createdAt: null,
+          podKey: parent.podKey != null ? parent.podKey : null,
+          podLabel: parent.podLabel != null ? parent.podLabel : null,
+          selfPod: parent.selfPod === true,
+          observed: parent.observed !== false,
+          // §4.1: no `dispatching` phase — by the time the tool_use is written the
+          // child sub-agent is already executing, and there is no container to spin up.
+          state: 'working',
+          step: null,
+          exitScheduled: false,
+          exitTimer: null,
+          exitCode: null,
+          execTs: null,
+          stepNum: null,
+          stepCount: 0,
+          recentSteps: [],
+          dispatchTaskText: d.description != null ? d.description : null,
+          doneSummary: null,
+          // inferred-child markers (§3.4) + wind-down seams (parentNodeId, lastSeen).
+          inferred: true,
+          containerBacked: false,
+          parentNodeId,
+          lastSeen: clock.now(),
+          ttlTimer: null,
+        };
+        liveAgents.set(id, entry);
+        membershipChanged = true;
+        bus.emit(EVENTS.AGENT_ENTER, publicEntry(entry));
+        // §4.2 trigger 3: arm the stall-guard so a child whose `tool_result` is never
+        // observed (parent crash, log rotation, truncated tail) cannot leak forever.
+        scheduleSubagentTtlSweep(id, subagentTtlMs);
+      } else if (d.kind === 'dispatch:end') {
+        // §4.2 trigger 1 (authoritative completion): the matching `tool_result`
+        // landed — wind the child down clean. A non-matching end (no such child)
+        // is a silent no-op; handleExit early-returns on an already-winding child,
+        // so a double end is idempotent.
+        if (!d.toolUseId) continue;
+        handleExit('sub::' + d.toolUseId, 0);
+      }
+    }
+
+    if (membershipChanged) recomputeEdges();
+  }
+
   // Fast activity signal from per-container `docker logs` tailing
   // (src/dockerLogs.js). The FIRST byte a container emits proves it has started
   // acting/thinking — advance a still-`dispatching` node straight to `working`,
@@ -538,6 +669,7 @@ function createReconciler({
   return {
     applyDockerPoll,
     applyLogEvent,
+    applyDispatchEvents,
     applyDockerLogActivity,
     applyLogFreshness,
     applyJournalEvent,
